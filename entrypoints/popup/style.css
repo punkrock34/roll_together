@@ -1,0 +1,116 @@
+@import "../../src/ui/theme.css";
+
+body {
+  width: 360px;
+}
+
+#app {
+  padding: 18px;
+}
+
+.shell {
+  display: grid;
+  gap: 14px;
+}
+
+.hero,
+.panel {
+  background: linear-gradient(
+    180deg,
+    rgba(34, 50, 70, 0.92),
+    rgba(22, 33, 45, 0.92)
+  );
+  border: 1px solid var(--rt-border);
+  border-radius: 20px;
+  box-shadow: var(--rt-shadow);
+}
+
+.hero {
+  padding: 18px;
+}
+
+.hero h1 {
+  margin: 0 0 6px;
+  font-size: 19px;
+}
+
+.hero p,
+.muted {
+  margin: 0;
+  color: var(--rt-muted);
+  font-size: 13px;
+}
+
+.panel {
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.status {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--rt-accent-soft);
+  color: var(--rt-text);
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.primary {
+  background: var(--rt-accent);
+  color: #101722;
+}
+
+.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--rt-text);
+}
+
+.share-url {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--rt-border);
+  padding: 10px 12px;
+  background: rgba(7, 12, 18, 0.6);
+  color: var(--rt-text);
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.list a {
+  color: var(--rt-text);
+  text-decoration: none;
+}
+
+.list li {
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}

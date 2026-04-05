@@ -1,80 +1,110 @@
-# Roll Together
-Roll Together is a browser extension for Google Chrome and Mozilla Firefox. It synchronizes Crunchyroll Videos that are being played at multiple computers.
+# Roll Together v2 Extension
 
-## Retirement note
-I believe this extension's purpose was completed as we went through the pandemic and were able to still feel close our friends, at least while we watched anime. Since then, several other forks and new extensions with similar purposes were created. Finally, the maintainance cost, as an totally free open source project, increased with manifest v3, changes in the crunchyroll player and pushbacks from Google to publish fixes.
+Roll Together v2 is a maintained continuation of the original Roll Together browser extension. It keeps the anonymous watch-party model, stays focused on browser extensions, and is being rebuilt to be easier to maintain, easier to self-host, and friendlier to Firefox and Chrome.
 
-I want to leave a huge thanks to everyone who contributed to this project.
+## Project Lineage
 
-## Browser Support
-- **Chrome/Chromium**: Manifest V3 (Chrome 116+)
-- **Firefox**: Manifest V2 (Firefox 109+)
+This project continues the work started by SamuraiExx on the original [`roll_together`](https://github.com/samuraiexx/roll_together) and [`roll_together_backend`](https://github.com/samuraiexx/roll_together_backend) repositories. The original work remains MIT-licensed, and this repository keeps that license and attribution intact while evolving the codebase into a more maintainable v2.
 
-## Download
-- **Chrome**: [Chrome Web Store](https://chrome.google.com/webstore/detail/ilpfeljgdikoabaclkjgkbeegeoijfca)
-- **Firefox**: Available as a signed add-on (coming soon)
+The original README has been preserved in [README.legacy.md](README.legacy.md).
 
-## Development Setup
+## What v2 Changes
+
+- WXT-based build pipeline with generated manifests for Chrome and Firefox.
+- Browser-extension-first architecture with isolated provider, sync, and storage layers.
+- Local-first watched-progress tracking stored in the extension.
+- Configurable backend URLs for local development and self-hosting.
+- Cleaner popup and options flows focused on anonymous rooms and room sharing.
+
+## Current Scope
+
+v2 intentionally stays:
+
+- Crunchyroll-first.
+- Anonymous, with no mandatory accounts.
+- Split into two repositories: extension frontend and backend.
+
+v2 intentionally does not include full chat yet. Stable sync, reconnect behavior, better room UX, and simple self-hosting come first.
+
+## Development
 
 ### Prerequisites
-- Node.js and npm
-- Git
 
-### Building the Extension
+- Node.js 20+
+- npm 10+
 
-#### For Chrome (Manifest V3):
+### Install
+
 ```bash
 npm install
-npm run build:chrome
-# Output will be in the 'build' directory
 ```
 
-#### For Firefox (Manifest V2):
+### Run in Development
+
 ```bash
-npm install
-npm run build:firefox
-# Output will be in the 'build-firefox' directory
+npm run dev:chrome
+npm run dev:firefox
 ```
 
-#### For both browsers:
+### Build
+
 ```bash
-npm run build:production:chrome
-npm run build:production:firefox
-npm run package
-# Creates rolltogether-chrome.zip and rolltogether-firefox.zip
+npm run build
 ```
 
-### Development Mode
+### Package ZIPs
+
 ```bash
-# Watch mode for Chrome
-npm run watch:chrome
-
-# Watch mode for Firefox
-npm run watch:firefox
+npm run zip
 ```
 
-## Installation from Source
+### Quality Checks
 
-### Chrome/Chromium
-1. Open the Extension Management page by navigating to chrome://extensions.
-2. Enable Developer Mode by clicking the toggle switch next to Developer mode.
-3. Click the LOAD UNPACKED button and select the `build` directory.
+```bash
+npm run lint
+npm run check
+npm run test
+```
 
-### Firefox
-1. Navigate to about:debugging
-2. Click "This Firefox"
-3. Click "Load Temporary Add-on"
-4. Select any file in the `build-firefox` directory
+## Local Backend Configuration
 
-![](https://developer.chrome.com/static/images/get_started/load_extension.png)
+Create a local `.env` file from `.env.example` if you want to override the default backend endpoints used by the extension build.
 
-## TODO
-- [x] Customizable Palette
-- [x] Improve Logo/Name
-- [x] Improve structure to allow more than one tab at the same time
-- [x] Firefox Browser Support
-- [ ] Work with autoplay
-- [ ] Create a Website
+```bash
+cp .env.example .env
+```
 
-## Related Repos
-Backend repo: https://github.com/samuraiexx/roll_together_backend
+Defaults target a backend running on `http://localhost:3000`.
+
+## Architecture Overview
+
+- `entrypoints/`
+  Runtime entrypoints for the extension background, popup, options page, and Crunchyroll content script.
+- `src/core/`
+  Shared room protocol types, storage helpers, room-link helpers, and sync reconciliation logic.
+- `src/providers/crunchyroll/`
+  Crunchyroll-specific player detection and episode metadata extraction.
+- `src/platform/`
+  Browser/runtime wrappers.
+- `src/ui/`
+  Shared visual tokens for extension surfaces.
+
+## Manual Smoke Test
+
+1. Start the backend from the sibling backend repository.
+2. Run `npm run dev:chrome`.
+3. Load the generated Chrome build as an unpacked extension.
+4. Open the same Crunchyroll episode in two browser windows.
+5. Create a room in window one and open the shared link in window two.
+6. Verify play, pause, and seek sync.
+7. Verify watched progress appears in the options page.
+
+## Browser Support Notes
+
+- Chrome/Chromium: Manifest V3 background service worker flow.
+- Firefox: MV3 packaging with explicit Gecko metadata for signing and distribution.
+
+## Related Repositories
+
+- Backend: sibling `roll_together_backend` repo in this workspace
+- Original backend: https://github.com/samuraiexx/roll_together_backend

@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+  --rt-bg: #0f1721;
+  --rt-panel: #17212d;
+  --rt-panel-strong: #223246;
+  --rt-border: rgba(152, 178, 204, 0.2);
+  --rt-text: #eef4fb;
+  --rt-muted: #9db0c4;
+  --rt-accent: #ff7b3d;
+  --rt-accent-soft: rgba(255, 123, 61, 0.16);
+  --rt-success: #4bd4a8;
+  --rt-danger: #ff6b6b;
+  --rt-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+  font-family: "Segoe UI", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(255, 123, 61, 0.18),
+      transparent 42%
+    ),
+    linear-gradient(180deg, #101722 0%, #0a1018 100%);
+  color: var(--rt-text);
+}
+
+button,
+input {
+  font: inherit;
+}

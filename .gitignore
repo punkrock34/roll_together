@@ -1,6 +1,8 @@
-build/
-build-firefox/
+.output/
+.wxt/
+coverage/
+dist/
 node_modules/
-rolltogether.zip
-rolltogether-chrome.zip
-rolltogether-firefox.zip
+*.zip
+.env
+.env.local
