@@ -70,6 +70,8 @@ npm run dev:firefox
 
 - [Development guide](docs/development.md)
 - [Architecture notes](docs/architecture.md)
+- [Release guide](docs/releases.md)
+- [Chrome Web Store notes](docs/chrome-web-store.md)
 
 ---
 

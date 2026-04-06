@@ -2,9 +2,11 @@
 
 This repository can publish browser release assets through GitHub Releases.
 
+For Chrome Web Store publishing details, see [chrome-web-store.md](chrome-web-store.md).
+
 ## What the release workflow does
 
-When you push a tag like `v4.2.2`, GitHub Actions will:
+When you push a tag like `v4.3.1`, GitHub Actions will:
 
 1. install dependencies
 2. run lint, typecheck, and tests
@@ -24,6 +26,8 @@ If AMO signing secrets are configured, the workflow also uploads:
 
 That signed `.xpi` is the file you can share directly with Firefox users for self-distribution.
 
+If Chrome Web Store variables and secrets are configured, the workflow can also upload the Chrome ZIP to the Chrome Web Store.
+
 ## GitHub repository secrets
 
 If you want the workflow to produce a signed Firefox `.xpi`, add these repository secrets:
@@ -39,6 +43,13 @@ Mozilla signing reference:
 
 <https://extensionworkshop.com/documentation/develop/getting-started-with-web-ext/>
 
+If you want Chrome Web Store upload automation, also configure:
+
+- repository variable `CWS_EXTENSION_ID`
+- repository variable `CWS_PUBLISHER_ID`
+- repository variable `CWS_AUTO_PUBLISH`
+- repository secret `CWS_SERVICE_ACCOUNT_KEY`
+
 ## Release steps
 
 1. Bump the extension version in:
@@ -48,7 +59,7 @@ Mozilla signing reference:
 3. Create a tag that matches the package version:
 
 ```bash
-git tag v4.2.2
+git tag v4.3.1
 git push origin main --tags
 ```
 
@@ -58,7 +69,7 @@ The workflow checks that the tag matches `package.json`. A mismatch fails the re
 
 You can also run the workflow manually from GitHub Actions.
 
-If you do, it creates or updates a release using the current `package.json` version as the tag name, for example `v4.2.2`.
+If you do, it creates or updates a release using the current `package.json` version as the tag name, for example `v4.3.1`.
 
 ## Sharing with users
 

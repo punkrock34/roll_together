@@ -33,6 +33,64 @@ export default defineContentScript({
     let scanBurstTimeoutIds: number[] = [];
     let lastPageKey = `${window.location.href}|${document.title}`;
     let lastObservedCurrentTime: number | undefined;
+    let pendingRemotePlayback: ApplyRemotePlaybackMessage | undefined;
+    let pendingRemoteRetryTimeoutId: number | undefined;
+    let pendingRemoteRetryCount = 0;
+    let playPromise: Promise<void> | undefined;
+
+    const clearPendingRemoteRetry = () => {
+      if (pendingRemoteRetryTimeoutId) {
+        window.clearTimeout(pendingRemoteRetryTimeoutId);
+        pendingRemoteRetryTimeoutId = undefined;
+      }
+    };
+
+    const clearPendingRemotePlayback = () => {
+      pendingRemotePlayback = undefined;
+      pendingRemoteRetryCount = 0;
+      clearPendingRemoteRetry();
+    };
+
+    const isSameRemotePlayback = (
+      left: ApplyRemotePlaybackMessage | undefined,
+      right: ApplyRemotePlaybackMessage,
+    ) => {
+      if (!left) {
+        return false;
+      }
+
+      return (
+        left.roomId === right.roomId &&
+        left.hostSessionId === right.hostSessionId &&
+        left.playback.episodeUrl === right.playback.episodeUrl &&
+        left.playback.state === right.playback.state &&
+        left.playback.currentTime === right.playback.currentTime &&
+        left.playback.updatedAt === right.playback.updatedAt
+      );
+    };
+
+    const schedulePendingRemotePlaybackRetry = (delayMs = 500) => {
+      if (!pendingRemotePlayback || pendingRemoteRetryCount >= 6) {
+        return;
+      }
+
+      clearPendingRemoteRetry();
+      pendingRemoteRetryTimeoutId = window.setTimeout(() => {
+        pendingRemoteRetryTimeoutId = undefined;
+        pendingRemoteRetryCount += 1;
+        if (pendingRemotePlayback) {
+          applyRemotePlayback(pendingRemotePlayback, true);
+        }
+      }, delayMs);
+    };
+
+    const tryApplyPendingRemotePlayback = (isRetry = false) => {
+      if (!pendingRemotePlayback) {
+        return;
+      }
+
+      applyRemotePlayback(pendingRemotePlayback, isRetry);
+    };
 
     const buildSnapshot = (): PlaybackSnapshot | null => {
       if (!player) {
@@ -77,13 +135,32 @@ export default defineContentScript({
       postSnapshot("interaction");
     };
 
-    const applyRemotePlayback = (message: ApplyRemotePlaybackMessage) => {
+    const applyRemotePlayback = (
+      message: ApplyRemotePlaybackMessage,
+      isRetry = false,
+    ) => {
+      if (!isRetry && !isSameRemotePlayback(pendingRemotePlayback, message)) {
+        pendingRemoteRetryCount = 0;
+        clearPendingRemoteRetry();
+      }
+
+      pendingRemotePlayback = message;
+
       const snapshot = buildSnapshot();
       if (!player || !snapshot) {
         return;
       }
 
       const decision = buildSyncDecision(snapshot, message.playback);
+      if (
+        !decision.shouldPause &&
+        !decision.shouldPlay &&
+        !decision.shouldSeek
+      ) {
+        clearPendingRemotePlayback();
+        return;
+      }
+
       ignoreLocalEventsUntil = Date.now() + 500;
 
       if (decision.shouldSeek) {
@@ -91,12 +168,40 @@ export default defineContentScript({
       }
 
       if (decision.shouldPause) {
-        player.pause();
+        const pausePlayer = () => {
+          if (!player) {
+            return;
+          }
+
+          player.pause();
+          if (decision.shouldSeek) {
+            player.currentTime = decision.targetTime;
+          }
+          clearPendingRemotePlayback();
+        };
+
+        if (playPromise) {
+          void playPromise.finally(() => {
+            playPromise = undefined;
+            pausePlayer();
+          });
+        } else {
+          pausePlayer();
+        }
+        return;
       }
 
       if (decision.shouldPlay) {
-        void player.play().catch(() => undefined);
+        playPromise = player.play();
+        void playPromise
+          .catch(() => undefined)
+          .finally(() => {
+            playPromise = undefined;
+            schedulePendingRemotePlaybackRetry();
+          });
       }
+
+      schedulePendingRemotePlaybackRetry(750);
     };
 
     const detachPlayer = () => {
@@ -113,6 +218,7 @@ export default defineContentScript({
 
       detachPlayer();
       clearScanBurst();
+      clearPendingRemoteRetry();
       player = candidate;
       const cleanups: Array<() => void> = [];
 
@@ -130,6 +236,18 @@ export default defineContentScript({
           candidate.removeEventListener(eventName, handleLocalChange);
         });
       }
+
+      const handlePlaybackReady = () => {
+        tryApplyPendingRemotePlayback();
+      };
+      candidate.addEventListener("playing", handlePlaybackReady);
+      candidate.addEventListener("canplay", handlePlaybackReady);
+      candidate.addEventListener("loadeddata", handlePlaybackReady);
+      cleanups.push(() => {
+        candidate.removeEventListener("playing", handlePlaybackReady);
+        candidate.removeEventListener("canplay", handlePlaybackReady);
+        candidate.removeEventListener("loadeddata", handlePlaybackReady);
+      });
 
       const handleTimeUpdate = () => {
         const currentTime = candidate.currentTime;
@@ -155,6 +273,7 @@ export default defineContentScript({
       };
 
       postSnapshot("initial");
+      tryApplyPendingRemotePlayback();
     };
 
     const clearScanBurst = () => {
@@ -271,6 +390,7 @@ export default defineContentScript({
     port.onDisconnect.addListener(() => {
       observer.disconnect();
       detachPlayer();
+      clearPendingRemotePlayback();
       clearScanBurst();
       if (pageKeyPollIntervalId) {
         window.clearInterval(pageKeyPollIntervalId);
