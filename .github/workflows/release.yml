@@ -12,6 +12,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+      AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
 
     steps:
       - name: Checkout
@@ -25,7 +28,7 @@ jobs:
 
       - name: Read package version
         id: version
-        run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+        run: echo "value=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag matches package version
         if: github.event_name == 'push'
@@ -60,10 +63,10 @@ jobs:
           npm run zip:firefox
 
       - name: Sign Firefox XPI for self-distribution
-        if: ${{ secrets.AMO_API_KEY != '' && secrets.AMO_API_SECRET != '' }}
+        if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
         env:
-          WEB_EXT_API_KEY: ${{ secrets.AMO_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+          WEB_EXT_API_KEY: ${{ env.AMO_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ env.AMO_API_SECRET }}
         run: |
           npx web-ext@8 sign \
             --channel=unlisted \
