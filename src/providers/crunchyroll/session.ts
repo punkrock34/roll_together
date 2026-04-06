@@ -31,3 +31,10 @@ export function resolveRoomIdForTabContext(
 ): string | null {
   return (tabUrl ? getRoomIdFromUrl(tabUrl) : null) ?? fallbackRoomId ?? null;
 }
+
+export function didEpisodeChange(
+  previousPlayback: PlaybackSnapshot | undefined,
+  nextPlayback: PlaybackSnapshot,
+) {
+  return previousPlayback?.episodeUrl !== nextPlayback.episodeUrl;
+}

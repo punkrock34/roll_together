@@ -3,7 +3,7 @@ import { browser, type Browser } from "wxt/browser";
 import {
   CONTENT_PORT_NAME,
   POPUP_PORT_NAME,
-  type BackgroundOutboundMessage,
+  type ApplyRemotePlaybackMessage,
   type ContentOutboundMessage,
   type PopupRequestMessage,
   type PopupStateResponse,
@@ -12,8 +12,9 @@ import {
 import {
   PROTOCOL_VERSION,
   type JoinMessage,
-  type PingMessage,
+  type NavigateMessage,
   parseServerMessage,
+  type PingMessage,
   type PlaybackSnapshot,
   type ServerMessage,
   type SyncMessage,
@@ -23,12 +24,18 @@ import {
   getSettings,
   getWatchProgressForEpisode,
   listRecentRooms,
+  type ExtensionSettings,
   upsertRecentRoom,
   upsertWatchProgress,
 } from "../src/core/storage";
+import {
+  arePlaybackSnapshotsSimilar,
+  buildSyncDecision,
+} from "../src/core/reconcile";
 import { buildRoomInviteUrl, getRoomIdFromUrl } from "../src/core/url";
 import { isCrunchyrollUrl } from "../src/providers/crunchyroll/player";
 import {
+  didEpisodeChange,
   normalizePlaybackSnapshotForTab,
   resolveRoomIdForTabContext,
 } from "../src/providers/crunchyroll/session";
@@ -39,10 +46,12 @@ interface TabSession {
   activeFrameId?: number;
   tabUrl?: string;
   tabTitle?: string;
-  playback?: PlaybackSnapshot;
+  localPlayback?: PlaybackSnapshot;
+  roomPlayback?: PlaybackSnapshot;
   roomIdFromUrl?: string | null;
   roomId?: string;
   sessionId?: string;
+  hostSessionId?: string;
   participantCount: number;
   connectionState: RoomConnectionStatus;
   lastError?: string;
@@ -51,19 +60,14 @@ interface TabSession {
   reconnectTimeout?: ReturnType<typeof setTimeout>;
   cleanupTimeout?: ReturnType<typeof setTimeout>;
   autoJoinSuppressedRoomId?: string;
+  lastOutboundPlayback?: PlaybackSnapshot;
+  lastOutboundAt?: number;
 }
 
-const DEFAULT_ACTION_TITLE = "Roll Together v2";
-
-function makeRoomStateMessage(session: TabSession): BackgroundOutboundMessage {
-  return {
-    type: "background:room-state",
-    connectionState: session.connectionState,
-    roomId: session.roomId,
-    participantCount: session.participantCount,
-    lastError: session.lastError,
-  };
-}
+const DEFAULT_ACTION_TITLE = "Roll Together";
+const NAVIGATION_CLEANUP_TIMEOUT_MS = 12_000;
+const DISCONNECTED_CLEANUP_TIMEOUT_MS = 3_000;
+const HOST_HEARTBEAT_INTERVAL_MS = 1_500;
 
 export default defineBackground({
   type: "module",
@@ -86,9 +90,19 @@ export default defineBackground({
       return created;
     };
 
+    const getActivePort = (
+      session: TabSession,
+    ): Browser.runtime.Port | undefined => {
+      if (session.activeFrameId !== undefined) {
+        return session.ports.get(session.activeFrameId);
+      }
+
+      return session.ports.values().next().value;
+    };
+
     const postToContent = (
       session: TabSession,
-      message: BackgroundOutboundMessage,
+      message: ApplyRemotePlaybackMessage,
     ) => {
       const port = getActivePort(session);
       if (!port) {
@@ -104,32 +118,19 @@ export default defineBackground({
       }
     };
 
-    const getActivePort = (
-      session: TabSession,
-    ): Browser.runtime.Port | undefined => {
-      if (session.activeFrameId !== undefined) {
-        return session.ports.get(session.activeFrameId);
-      }
-
-      return session.ports.values().next().value;
-    };
-
     const publishRoomState = (session: TabSession) => {
       updateActionState(session);
-      postToContent(session, makeRoomStateMessage(session));
     };
 
     const updateActionState = (session: TabSession) => {
-      const title = getActionTitle(session);
-      const badgeText = getActionBadgeText(session);
-
       runActionUpdate(
         browser.action.setTitle({
           tabId: session.tabId,
-          title,
+          title: getActionTitle(session),
         }),
       );
 
+      const badgeText = getActionBadgeText(session);
       runActionUpdate(
         browser.action.setBadgeText({
           tabId: session.tabId,
@@ -207,6 +208,8 @@ export default defineBackground({
 
       if (options.clearRoom) {
         session.roomId = undefined;
+        session.hostSessionId = undefined;
+        session.roomPlayback = undefined;
         session.participantCount = 1;
       }
 
@@ -218,18 +221,18 @@ export default defineBackground({
     const scheduleReconnect = (session: TabSession, roomId: string) => {
       stopReconnect(session);
       session.reconnectTimeout = setTimeout(() => {
-        if (!getActivePort(session) || !session.playback) {
+        if (!getActivePort(session) || !session.localPlayback) {
           return;
         }
         void connectSession(session, roomId);
-      }, 1500);
+      }, 1_500);
     };
 
     const connectSession = async (
       session: TabSession,
       requestedRoomId?: string,
     ) => {
-      if (!session.playback) {
+      if (!session.localPlayback) {
         return;
       }
 
@@ -252,7 +255,7 @@ export default defineBackground({
       session.socket = socket;
 
       socket.addEventListener("open", () => {
-        if (session.socket !== socket || !session.playback) {
+        if (session.socket !== socket || !session.localPlayback) {
           return;
         }
 
@@ -261,7 +264,7 @@ export default defineBackground({
           version: PROTOCOL_VERSION,
           roomId: requestedRoomId,
           sessionId: session.sessionId,
-          playback: session.playback,
+          playback: session.localPlayback,
         };
 
         socket.send(JSON.stringify(joinMessage));
@@ -328,6 +331,134 @@ export default defineBackground({
       });
     };
 
+    const navigateTabToPlayback = (
+      session: TabSession,
+      playback: PlaybackSnapshot,
+      roomId: string,
+    ) => {
+      const targetUrl = buildRoomInviteUrl(playback.episodeUrl, roomId);
+      session.connectionState = "switching";
+      session.lastError = undefined;
+      session.roomPlayback = playback;
+      session.tabUrl = targetUrl;
+      publishRoomState(session);
+
+      void browser.tabs
+        .update(session.tabId, { url: targetUrl })
+        .catch((error) => {
+          if (!isIgnorableTabLifecycleError(error)) {
+            console.error("Failed to navigate room tab", error);
+          }
+        });
+    };
+
+    const sendRoomUpdate = (
+      session: TabSession,
+      type: "sync" | "navigate",
+      playback: PlaybackSnapshot,
+    ) => {
+      if (!session.socket || session.socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      const payload: SyncMessage | NavigateMessage =
+        type === "navigate"
+          ? {
+              type,
+              version: PROTOCOL_VERSION,
+              playback,
+            }
+          : {
+              type,
+              version: PROTOCOL_VERSION,
+              playback,
+            };
+
+      session.socket.send(JSON.stringify(payload));
+      session.roomPlayback = playback;
+      session.lastOutboundPlayback = playback;
+      session.lastOutboundAt = Date.now();
+    };
+
+    const shouldSendHostUpdate = (
+      session: TabSession,
+      previousPlayback: PlaybackSnapshot | undefined,
+      nextPlayback: PlaybackSnapshot,
+      reason: ContentOutboundMessage["reason"],
+    ): "sync" | "navigate" | undefined => {
+      if (!session.roomId || !session.sessionId || !session.hostSessionId) {
+        return undefined;
+      }
+
+      if (session.hostSessionId !== session.sessionId) {
+        return undefined;
+      }
+
+      if (didEpisodeChange(previousPlayback, nextPlayback)) {
+        return "navigate";
+      }
+
+      if (reason === "heartbeat") {
+        if (nextPlayback.state !== "playing") {
+          return undefined;
+        }
+
+        const enoughTimePassed =
+          !session.lastOutboundAt ||
+          Date.now() - session.lastOutboundAt >= HOST_HEARTBEAT_INTERVAL_MS;
+        if (
+          enoughTimePassed &&
+          !arePlaybackSnapshotsSimilar(
+            session.lastOutboundPlayback,
+            nextPlayback,
+            0.15,
+          )
+        ) {
+          return "sync";
+        }
+
+        return undefined;
+      }
+
+      if (
+        !arePlaybackSnapshotsSimilar(
+          session.lastOutboundPlayback,
+          nextPlayback,
+          0.05,
+        )
+      ) {
+        return "sync";
+      }
+
+      return undefined;
+    };
+
+    const handleFollowerCorrection = (
+      session: TabSession,
+      playback: PlaybackSnapshot,
+      reason: ContentOutboundMessage["reason"],
+    ) => {
+      if (!session.roomId || !session.roomPlayback || reason === "heartbeat") {
+        return;
+      }
+
+      const decision = buildSyncDecision(playback, session.roomPlayback);
+      if (
+        playback.episodeUrl !== session.roomPlayback.episodeUrl ||
+        decision.shouldPause ||
+        decision.shouldPlay ||
+        decision.shouldSeek
+      ) {
+        postToContent(session, {
+          type: "background:apply-remote",
+          roomId: session.roomId,
+          participantCount: session.participantCount,
+          hostSessionId: session.hostSessionId ?? "",
+          playback: session.roomPlayback,
+        });
+      }
+    };
+
     const handleServerMessage = async (
       session: TabSession,
       message: ServerMessage,
@@ -337,9 +468,10 @@ export default defineBackground({
           session.connectionState = "connected";
           session.roomId = message.roomId;
           session.sessionId = message.sessionId;
+          session.hostSessionId = message.hostSessionId;
           session.participantCount = message.participantCount;
           session.lastError = undefined;
-          session.playback = message.playback;
+          session.roomPlayback = message.playback;
 
           const shareUrl =
             session.tabUrl && session.roomId
@@ -356,42 +488,114 @@ export default defineBackground({
             });
           }
 
-          postToContent(session, {
-            type: "background:apply-remote",
-            roomId: message.roomId,
-            participantCount: message.participantCount,
-            playback: message.playback,
-          });
+          if (
+            session.localPlayback &&
+            !arePlaybackSnapshotsSimilar(
+              session.localPlayback,
+              message.playback,
+              0.2,
+            )
+          ) {
+            postToContent(session, {
+              type: "background:apply-remote",
+              roomId: message.roomId,
+              participantCount: message.participantCount,
+              hostSessionId: message.hostSessionId,
+              playback: message.playback,
+            });
+          }
+
           publishRoomState(session);
           break;
         }
         case "sync":
+          session.connectionState = "connected";
           session.participantCount = message.participantCount;
-          session.playback = message.playback;
+          session.hostSessionId = message.hostSessionId;
+          session.roomPlayback = message.playback;
+          session.lastError = undefined;
           postToContent(session, {
             type: "background:apply-remote",
             roomId: message.roomId,
             participantCount: message.participantCount,
+            hostSessionId: message.hostSessionId,
             playback: message.playback,
           });
           publishRoomState(session);
           break;
+        case "navigate":
+          session.roomId = message.roomId;
+          session.participantCount = message.participantCount;
+          session.hostSessionId = message.hostSessionId;
+          session.roomPlayback = message.playback;
+          session.lastError = undefined;
+
+          await upsertRecentRoom({
+            roomId: message.roomId,
+            shareUrl: buildRoomInviteUrl(
+              message.playback.episodeUrl,
+              message.roomId,
+            ),
+            episodeTitle: message.playback.episodeTitle,
+            episodeUrl: message.playback.episodeUrl,
+            updatedAt: Date.now(),
+          });
+
+          if (
+            session.localPlayback?.episodeUrl === message.playback.episodeUrl
+          ) {
+            session.connectionState = "connected";
+            postToContent(session, {
+              type: "background:apply-remote",
+              roomId: message.roomId,
+              participantCount: message.participantCount,
+              hostSessionId: message.hostSessionId,
+              playback: message.playback,
+            });
+          } else {
+            navigateTabToPlayback(session, message.playback, message.roomId);
+          }
+          publishRoomState(session);
+          break;
         case "presence":
           session.participantCount = message.participantCount;
+          session.hostSessionId = message.hostSessionId;
+          if (session.roomId) {
+            session.connectionState =
+              session.connectionState === "switching"
+                ? "switching"
+                : "connected";
+          }
           publishRoomState(session);
           break;
         case "pong":
           break;
         case "error":
-          session.connectionState = "error";
-          session.lastError = message.message;
+          if (
+            message.code === "not_host" &&
+            session.roomPlayback &&
+            session.roomId
+          ) {
+            session.connectionState = "connected";
+            session.lastError = "Only the host can control this room.";
+            postToContent(session, {
+              type: "background:apply-remote",
+              roomId: session.roomId,
+              participantCount: session.participantCount,
+              hostSessionId: session.hostSessionId ?? "",
+              playback: session.roomPlayback,
+            });
+          } else {
+            session.connectionState = "error";
+            session.lastError = message.message;
+          }
           publishRoomState(session);
           break;
       }
     };
 
     const maybeAutoJoin = (session: TabSession) => {
-      if (!session.playback || !session.roomIdFromUrl) {
+      if (!session.localPlayback || !session.roomIdFromUrl) {
         return;
       }
 
@@ -406,11 +610,37 @@ export default defineBackground({
         return;
       }
 
-      if (session.connectionState === "connecting") {
+      if (
+        session.connectionState === "connecting" ||
+        session.connectionState === "switching"
+      ) {
         return;
       }
 
       void connectSession(session, session.roomIdFromUrl);
+    };
+
+    const getLiveTabContext = async (
+      session: TabSession,
+      message: ContentOutboundMessage,
+      port: Browser.runtime.Port,
+    ) => {
+      const liveTab = await browser.tabs
+        .get(session.tabId)
+        .catch(() => undefined);
+
+      return {
+        tabUrl:
+          liveTab?.url ??
+          port.sender?.tab?.url ??
+          session.tabUrl ??
+          message.tabUrl,
+        tabTitle:
+          liveTab?.title ??
+          port.sender?.tab?.title ??
+          session.tabTitle ??
+          message.episode.episodeTitle,
+      };
     };
 
     const handleContentSnapshot = async (
@@ -418,20 +648,20 @@ export default defineBackground({
       message: ContentOutboundMessage,
       port: Browser.runtime.Port,
     ) => {
-      const senderTabUrl = port.sender?.tab?.url;
-      const senderTabTitle = port.sender?.tab?.title;
+      const previousPlayback = session.localPlayback;
+      const liveTab = await getLiveTabContext(session, message, port);
       const normalizedPlayback = normalizePlaybackSnapshotForTab(
         message.playback,
-        senderTabUrl,
-        senderTabTitle,
+        liveTab.tabUrl,
+        liveTab.tabTitle,
       );
 
       session.activeFrameId = port.sender?.frameId ?? 0;
-      session.tabUrl = senderTabUrl ?? session.tabUrl ?? message.tabUrl;
-      session.tabTitle = senderTabTitle ?? session.tabTitle;
-      session.playback = normalizedPlayback;
+      session.tabUrl = liveTab.tabUrl ?? session.tabUrl ?? message.tabUrl;
+      session.tabTitle = liveTab.tabTitle ?? session.tabTitle;
+      session.localPlayback = normalizedPlayback;
       session.roomIdFromUrl = resolveRoomIdForTabContext(
-        senderTabUrl ?? session.tabUrl ?? message.tabUrl,
+        session.tabUrl,
         message.roomIdFromUrl ?? getRoomIdFromUrl(message.tabUrl),
       );
 
@@ -444,14 +674,30 @@ export default defineBackground({
 
       await upsertWatchProgress(normalizedPlayback);
 
+      if (
+        session.connectionState === "switching" &&
+        session.roomPlayback &&
+        session.roomPlayback.episodeUrl === normalizedPlayback.episodeUrl
+      ) {
+        session.connectionState = "connected";
+      }
+
       if (session.socket?.readyState === WebSocket.OPEN && session.roomId) {
-        const syncMessage: SyncMessage = {
-          type: "sync",
-          version: PROTOCOL_VERSION,
-          playback: normalizedPlayback,
-        };
-        session.socket.send(JSON.stringify(syncMessage));
-      } else {
+        const nextUpdateType = shouldSendHostUpdate(
+          session,
+          previousPlayback,
+          normalizedPlayback,
+          message.reason,
+        );
+
+        if (nextUpdateType) {
+          sendRoomUpdate(session, nextUpdateType, normalizedPlayback);
+          session.connectionState = "connected";
+          session.lastError = undefined;
+        } else {
+          handleFollowerCorrection(session, normalizedPlayback, message.reason);
+        }
+      } else if (!session.roomId) {
         session.connectionState = "ready";
       }
 
@@ -479,8 +725,11 @@ export default defineBackground({
               providerReady: false,
               connectionState: "unsupported",
               participantCount: 0,
+              backendHttpUrl: settings.backendHttpUrl,
               backendWsUrl: settings.backendWsUrl,
               recentRooms,
+              themeMode: settings.themeMode,
+              isHost: false,
             };
           }
 
@@ -492,32 +741,41 @@ export default defineBackground({
             activeTab.url && session?.roomId
               ? buildRoomInviteUrl(activeTab.url, session.roomId)
               : undefined;
+          const currentPlayback =
+            session?.roomPlayback ?? session?.localPlayback;
 
           return {
             activeTabId: activeTab.id,
             activeTabUrl: activeTab.url,
             supported,
-            providerReady: Boolean(session?.playback),
+            providerReady: Boolean(session?.localPlayback),
             connectionState: supported
               ? (session?.connectionState ?? "ready")
               : "unsupported",
             roomId: session?.roomId,
             shareUrl,
             participantCount: session?.participantCount ?? 0,
-            episodeTitle: session?.playback?.episodeTitle,
+            episodeTitle: currentPlayback?.episodeTitle,
+            backendHttpUrl: settings.backendHttpUrl,
             backendWsUrl: settings.backendWsUrl,
-            recentRooms: recentRooms.slice(0, 5),
+            recentRooms,
             watchProgress: await getWatchProgressForEpisode(
-              session?.playback?.episodeUrl,
+              currentPlayback?.episodeUrl,
             ),
             lastError: session?.lastError,
+            hostSessionId: session?.hostSessionId,
+            sessionId: session?.sessionId,
+            isHost:
+              Boolean(session?.sessionId) &&
+              session?.hostSessionId === session?.sessionId,
+            themeMode: settings.themeMode,
           };
         }
         case "popup:create-room": {
           const session = sessions.get(message.tabId);
-          if (session?.playback) {
+          if (session?.localPlayback) {
             session.autoJoinSuppressedRoomId = undefined;
-            await connectSession(session);
+            await connectSession(session, session.roomId);
           }
           return handlePopupMessage({ type: "popup:get-active-tab-state" });
         }
@@ -560,9 +818,12 @@ export default defineBackground({
         providerReady: false,
         connectionState: "unsupported",
         participantCount: 0,
+        backendHttpUrl: settings.backendHttpUrl,
         backendWsUrl: settings.backendWsUrl,
-        recentRooms: recentRooms.slice(0, 5),
+        recentRooms,
+        themeMode: settings.themeMode,
         lastError: "Unable to read extension state.",
+        isHost: false,
       };
     };
 
@@ -573,6 +834,37 @@ export default defineBackground({
         }
         return undefined;
       });
+    });
+
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !changes.settings) {
+        return;
+      }
+
+      const previousSettings = changes.settings.oldValue as
+        | ExtensionSettings
+        | undefined;
+      const nextSettings = changes.settings.newValue as
+        | ExtensionSettings
+        | undefined;
+      const backendChanged =
+        previousSettings?.backendWsUrl !== nextSettings?.backendWsUrl ||
+        previousSettings?.backendHttpUrl !== nextSettings?.backendHttpUrl;
+      if (!backendChanged) {
+        return;
+      }
+
+      for (const session of sessions.values()) {
+        if (
+          !session.roomId ||
+          !session.localPlayback ||
+          !getActivePort(session)
+        ) {
+          continue;
+        }
+
+        void connectSession(session, session.roomId);
+      }
     });
 
     browser.runtime.onMessage.addListener((message: PopupRequestMessage) => {
@@ -586,7 +878,9 @@ export default defineBackground({
             try {
               port.postMessage(response);
             } catch (error) {
-              console.error("Failed to respond to popup port", error);
+              if (!isIgnorablePortError(error)) {
+                console.error("Failed to respond to popup port", error);
+              }
             }
           });
         });
@@ -598,8 +892,6 @@ export default defineBackground({
       }
 
       const tabId = port.sender?.tab?.id;
-      const tabUrl = port.sender?.tab?.url;
-      const tabTitle = port.sender?.tab?.title;
       const frameId = port.sender?.frameId ?? 0;
 
       if (!tabId) {
@@ -608,9 +900,12 @@ export default defineBackground({
 
       const session = getOrCreateSession(tabId);
       session.ports.set(frameId, port);
-      session.tabUrl = tabUrl;
-      session.tabTitle = tabTitle;
-      session.connectionState = session.roomId ? "connected" : "ready";
+      session.connectionState =
+        session.roomId && session.connectionState !== "switching"
+          ? "connected"
+          : session.connectionState === "switching"
+            ? "switching"
+            : "ready";
 
       if (session.cleanupTimeout) {
         clearTimeout(session.cleanupTimeout);
@@ -633,21 +928,66 @@ export default defineBackground({
           return;
         }
 
-        session.cleanupTimeout = setTimeout(() => {
-          if (session.ports.size > 0) {
-            return;
-          }
+        session.cleanupTimeout = setTimeout(
+          () => {
+            if (session.ports.size > 0) {
+              return;
+            }
 
-          closeSocket(session, {
-            clearRoom: true,
-            clearIdentity: false,
-            suppressReconnect: true,
-            sendLeave: true,
-          });
-          sessions.delete(tabId);
-          clearActionState(tabId);
-        }, 3000);
+            closeSocket(session, {
+              clearRoom: true,
+              clearIdentity: false,
+              suppressReconnect: true,
+              sendLeave: true,
+            });
+            sessions.delete(tabId);
+            clearActionState(tabId);
+          },
+          session.roomId
+            ? NAVIGATION_CLEANUP_TIMEOUT_MS
+            : DISCONNECTED_CLEANUP_TIMEOUT_MS,
+        );
       });
+    });
+
+    browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      const session = sessions.get(tabId);
+      if (!session) {
+        return;
+      }
+
+      if (typeof changeInfo.url === "string") {
+        session.tabUrl = changeInfo.url;
+        session.roomIdFromUrl = resolveRoomIdForTabContext(
+          changeInfo.url,
+          session.roomIdFromUrl,
+        );
+        if (session.roomId) {
+          session.connectionState = "switching";
+          session.lastError = undefined;
+          publishRoomState(session);
+        }
+      }
+
+      if (typeof tab.title === "string" && tab.title.trim().length > 0) {
+        session.tabTitle = tab.title;
+      }
+    });
+
+    browser.tabs.onRemoved.addListener((tabId) => {
+      const session = sessions.get(tabId);
+      if (!session) {
+        return;
+      }
+
+      closeSocket(session, {
+        clearRoom: true,
+        clearIdentity: false,
+        suppressReconnect: true,
+        sendLeave: true,
+      });
+      sessions.delete(tabId);
+      clearActionState(tabId);
     });
   },
 });
@@ -693,7 +1033,10 @@ function getActionBadgeText(session: TabSession): string {
       : `${Math.max(session.participantCount, 1)}`;
   }
 
-  if (session.connectionState === "connecting") {
+  if (
+    session.connectionState === "connecting" ||
+    session.connectionState === "switching"
+  ) {
     return "...";
   }
 
@@ -701,7 +1044,7 @@ function getActionBadgeText(session: TabSession): string {
     return "!";
   }
 
-  if (session.playback) {
+  if (session.localPlayback) {
     return "ON";
   }
 
@@ -713,7 +1056,10 @@ function getActionBadgeColor(session: TabSession): string {
     return "#f97316";
   }
 
-  if (session.connectionState === "connecting") {
+  if (
+    session.connectionState === "connecting" ||
+    session.connectionState === "switching"
+  ) {
     return "#f59e0b";
   }
 
@@ -726,19 +1072,27 @@ function getActionBadgeColor(session: TabSession): string {
 
 function getActionTitle(session: TabSession): string {
   if (session.connectionState === "connected" && session.roomId) {
-    return `Roll Together v2: Connected to ${session.roomId.slice(0, 8)} with ${session.participantCount} viewer${session.participantCount === 1 ? "" : "s"}`;
+    const role =
+      session.sessionId && session.hostSessionId === session.sessionId
+        ? "host"
+        : "viewer";
+    return `Roll Together: ${role} in ${session.roomId.slice(0, 8)} with ${session.participantCount} viewer${session.participantCount === 1 ? "" : "s"}`;
+  }
+
+  if (session.connectionState === "switching") {
+    return "Roll Together: Switching episode";
   }
 
   if (session.connectionState === "connecting") {
-    return "Roll Together v2: Connecting to room";
+    return "Roll Together: Connecting to room";
   }
 
   if (session.connectionState === "error") {
-    return `Roll Together v2: ${session.lastError ?? "Connection issue"}`;
+    return `Roll Together: ${session.lastError ?? "Connection issue"}`;
   }
 
-  if (session.playback?.episodeTitle) {
-    return `Roll Together v2: Player detected for ${session.playback.episodeTitle}`;
+  if (session.localPlayback?.episodeTitle) {
+    return `Roll Together: Player detected for ${session.localPlayback.episodeTitle}`;
   }
 
   return DEFAULT_ACTION_TITLE;

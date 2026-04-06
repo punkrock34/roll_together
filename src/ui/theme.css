@@ -1,21 +1,49 @@
 :root {
-  color-scheme: dark;
-  --rt-bg: #0f1721;
-  --rt-panel: #17212d;
-  --rt-panel-strong: #223246;
-  --rt-border: rgba(152, 178, 204, 0.2);
-  --rt-text: #eef4fb;
-  --rt-muted: #9db0c4;
-  --rt-accent: #ff7b3d;
-  --rt-accent-soft: rgba(255, 123, 61, 0.16);
+  --rt-bg: #f4f1eb;
+  --rt-bg-alt: #fffaf4;
+  --rt-panel: rgba(255, 250, 243, 0.94);
+  --rt-panel-strong: #fff6ea;
+  --rt-border: rgba(113, 74, 30, 0.14);
+  --rt-text: #22150c;
+  --rt-muted: #6b5b50;
+  --rt-accent: #ff7a1a;
+  --rt-accent-soft: rgba(255, 122, 26, 0.14);
+  --rt-accent-strong: #d85d00;
+  --rt-success: #11845b;
+  --rt-danger: #b84b4b;
+  --rt-shadow: 0 18px 48px rgba(52, 34, 14, 0.14);
+  --rt-input: rgba(255, 255, 255, 0.86);
+  --rt-tab: rgba(255, 255, 255, 0.68);
+  color-scheme: light;
+  font-family: "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --rt-bg: #11161d;
+  --rt-bg-alt: #19212b;
+  --rt-panel: rgba(23, 31, 42, 0.94);
+  --rt-panel-strong: #243142;
+  --rt-border: rgba(177, 198, 222, 0.16);
+  --rt-text: #eef3f8;
+  --rt-muted: #9aabbd;
+  --rt-accent: #ff7a1a;
+  --rt-accent-soft: rgba(255, 122, 26, 0.18);
+  --rt-accent-strong: #ff974d;
   --rt-success: #4bd4a8;
-  --rt-danger: #ff6b6b;
-  --rt-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
-  font-family: "Segoe UI", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+  --rt-danger: #ff7d7d;
+  --rt-shadow: 0 22px 56px rgba(0, 0, 0, 0.34);
+  --rt-input: rgba(11, 16, 23, 0.78);
+  --rt-tab: rgba(255, 255, 255, 0.06);
+  color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
 }
 
 body {
@@ -23,14 +51,20 @@ body {
   background:
     radial-gradient(
       circle at top right,
-      rgba(255, 123, 61, 0.18),
-      transparent 42%
+      rgba(255, 122, 26, 0.18),
+      transparent 30%
     ),
-    linear-gradient(180deg, #101722 0%, #0a1018 100%);
+    radial-gradient(
+      circle at bottom left,
+      rgba(255, 183, 112, 0.12),
+      transparent 34%
+    ),
+    linear-gradient(180deg, var(--rt-bg-alt) 0%, var(--rt-bg) 100%);
   color: var(--rt-text);
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }

@@ -1,7 +1,7 @@
 @import "../../src/ui/theme.css";
 
 main {
-  max-width: 960px;
+  max-width: 980px;
   margin: 0 auto;
   padding: 32px 20px 56px;
   display: grid;
@@ -9,17 +9,28 @@ main {
 }
 
 .card {
-  background: linear-gradient(
-    180deg,
-    rgba(34, 50, 70, 0.92),
-    rgba(22, 33, 45, 0.92)
-  );
+  background: var(--rt-panel);
   border: 1px solid var(--rt-border);
-  border-radius: 20px;
+  border-radius: 24px;
   box-shadow: var(--rt-shadow);
   padding: 22px;
   display: grid;
-  gap: 14px;
+  gap: 16px;
+}
+
+.header-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.eyebrow,
+.muted {
+  color: var(--rt-muted);
+}
+
+.eyebrow {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .card h1,
@@ -28,24 +39,33 @@ main {
   margin: 0;
 }
 
+.section-head,
+.room-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
 label {
   display: grid;
   gap: 6px;
   font-size: 14px;
 }
 
-input {
+input,
+select {
   width: 100%;
   padding: 12px 14px;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid var(--rt-border);
-  background: rgba(7, 12, 18, 0.6);
+  background: var(--rt-input);
   color: var(--rt-text);
 }
 
 button {
   border: 0;
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 10px 14px;
   cursor: pointer;
   font-weight: 700;
@@ -59,12 +79,16 @@ button {
 
 .primary {
   background: var(--rt-accent);
-  color: #101722;
+  color: #1e1309;
 }
 
 .secondary {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--rt-panel-strong);
   color: var(--rt-text);
+}
+
+.danger {
+  color: var(--rt-danger);
 }
 
 .list {
@@ -75,13 +99,25 @@ button {
   gap: 10px;
 }
 
-.list li {
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+.list li,
+.room-item {
+  border-radius: 18px;
+  padding: 14px;
+  background: var(--rt-panel-strong);
+  border: 1px solid var(--rt-border);
 }
 
-.muted {
-  color: var(--rt-muted);
+.room-pill {
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--rt-accent-soft);
+  color: var(--rt-accent-strong);
+}
+
+.clamp {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

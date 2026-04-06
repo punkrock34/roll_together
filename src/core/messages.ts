@@ -1,6 +1,5 @@
-import type { PlaybackSnapshot } from "./protocol";
-import type { RecentRoomEntry, WatchProgressEntry } from "./storage";
-import type { EpisodeInfo } from "./protocol";
+import type { EpisodeInfo, PlaybackSnapshot } from "./protocol";
+import type { RecentRoomEntry, ThemeMode, WatchProgressEntry } from "./storage";
 
 export const CONTENT_PORT_NAME = "roll-together-content";
 export const POPUP_PORT_NAME = "roll-together-popup";
@@ -9,8 +8,15 @@ export type RoomConnectionStatus =
   | "unsupported"
   | "ready"
   | "connecting"
+  | "switching"
   | "connected"
   | "error";
+
+export type ContentSnapshotReason =
+  | "initial"
+  | "interaction"
+  | "heartbeat"
+  | "navigation";
 
 export interface ContentSnapshotMessage {
   type: "content:snapshot";
@@ -18,6 +24,7 @@ export interface ContentSnapshotMessage {
   episode: EpisodeInfo;
   playback: PlaybackSnapshot;
   roomIdFromUrl?: string | null;
+  reason: ContentSnapshotReason;
 }
 
 export type ContentOutboundMessage = ContentSnapshotMessage;
@@ -26,20 +33,11 @@ export interface ApplyRemotePlaybackMessage {
   type: "background:apply-remote";
   roomId: string;
   participantCount: number;
+  hostSessionId: string;
   playback: PlaybackSnapshot;
 }
 
-export interface RoomStateMessage {
-  type: "background:room-state";
-  connectionState: RoomConnectionStatus;
-  roomId?: string;
-  participantCount: number;
-  lastError?: string;
-}
-
-export type BackgroundOutboundMessage =
-  | ApplyRemotePlaybackMessage
-  | RoomStateMessage;
+export type BackgroundOutboundMessage = ApplyRemotePlaybackMessage;
 
 export interface PopupGetStateMessage {
   type: "popup:get-active-tab-state";
@@ -70,8 +68,13 @@ export interface PopupStateResponse {
   shareUrl?: string;
   participantCount: number;
   episodeTitle?: string;
+  backendHttpUrl: string;
   backendWsUrl: string;
   recentRooms: RecentRoomEntry[];
   watchProgress?: WatchProgressEntry;
   lastError?: string;
+  hostSessionId?: string;
+  sessionId?: string;
+  isHost: boolean;
+  themeMode: ThemeMode;
 }

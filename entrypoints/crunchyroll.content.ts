@@ -4,9 +4,10 @@ import {
   CONTENT_PORT_NAME,
   type ApplyRemotePlaybackMessage,
   type ContentOutboundMessage,
+  type ContentSnapshotReason,
 } from "../src/core/messages";
-import type { PlaybackSnapshot } from "../src/core/protocol";
 import { buildSyncDecision } from "../src/core/reconcile";
+import type { PlaybackSnapshot } from "../src/core/protocol";
 import { getRoomIdFromUrl } from "../src/core/url";
 import {
   extractEpisodeInfo,
@@ -25,6 +26,7 @@ export default defineContentScript({
     let ignoreLocalEventsUntil = 0;
     let lastBroadcastAt = 0;
     let scanQueued = false;
+    let lastPageKey = `${window.location.href}|${document.title}`;
 
     const buildSnapshot = (): PlaybackSnapshot | null => {
       if (!player) {
@@ -43,7 +45,7 @@ export default defineContentScript({
       };
     };
 
-    const postSnapshot = () => {
+    const postSnapshot = (reason: ContentSnapshotReason) => {
       const snapshot = buildSnapshot();
       if (!snapshot) {
         return;
@@ -55,9 +57,11 @@ export default defineContentScript({
         episode: extractEpisodeInfo(window.location.href, document.title),
         playback: snapshot,
         roomIdFromUrl: getRoomIdFromUrl(window.location.href),
+        reason,
       };
 
       port.postMessage(message);
+      lastBroadcastAt = Date.now();
     };
 
     const handleLocalChange = () => {
@@ -65,8 +69,7 @@ export default defineContentScript({
         return;
       }
 
-      lastBroadcastAt = Date.now();
-      postSnapshot();
+      postSnapshot("interaction");
     };
 
     const applyRemotePlayback = (message: ApplyRemotePlaybackMessage) => {
@@ -76,7 +79,7 @@ export default defineContentScript({
       }
 
       const decision = buildSyncDecision(snapshot, message.playback);
-      ignoreLocalEventsUntil = Date.now() + 800;
+      ignoreLocalEventsUntil = Date.now() + 500;
 
       if (decision.shouldSeek) {
         player.currentTime = decision.targetTime;
@@ -122,8 +125,8 @@ export default defineContentScript({
       }
 
       const handleTimeUpdate = () => {
-        if (Date.now() - lastBroadcastAt >= 2000) {
-          handleLocalChange();
+        if (Date.now() - lastBroadcastAt >= 1_250) {
+          postSnapshot("heartbeat");
         }
       };
       candidate.addEventListener("timeupdate", handleTimeUpdate);
@@ -137,7 +140,7 @@ export default defineContentScript({
         }
       };
 
-      postSnapshot();
+      postSnapshot("initial");
     };
 
     const scanForPlayer = () => {
@@ -189,8 +192,19 @@ export default defineContentScript({
       }
     });
 
+    window.setInterval(() => {
+      const nextPageKey = `${window.location.href}|${document.title}`;
+      if (nextPageKey !== lastPageKey) {
+        lastPageKey = nextPageKey;
+        scheduleScan();
+        postSnapshot("navigation");
+      }
+    }, 500);
+
     window.setInterval(scanForPlayer, 750);
-    window.setInterval(postSnapshot, 15_000);
+    window.setInterval(() => {
+      postSnapshot("heartbeat");
+    }, 10_000);
     scanForPlayer();
   },
 });
