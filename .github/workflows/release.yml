@@ -74,10 +74,25 @@ jobs:
           WEB_EXT_API_KEY: ${{ env.AMO_API_KEY }}
           WEB_EXT_API_SECRET: ${{ env.AMO_API_SECRET }}
         run: |
+          set +e
+          SIGN_OUTPUT="$(mktemp)"
           npx web-ext@8 sign \
             --channel=unlisted \
             --source-dir=.output/firefox-mv3 \
-            --artifacts-dir=.output/signed-firefox
+            --artifacts-dir=.output/signed-firefox \
+            2>&1 | tee "${SIGN_OUTPUT}"
+          SIGN_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${SIGN_EXIT_CODE}" -ne 0 ]; then
+            if grep -q "Version ${{ steps.version.outputs.value }} already exists." "${SIGN_OUTPUT}"; then
+              echo "Firefox version ${{ steps.version.outputs.value }} is already signed on AMO. Skipping re-sign on rerun."
+              exit 0
+            fi
+
+            echo "Firefox signing failed."
+            exit "${SIGN_EXIT_CODE}"
+          fi
 
           SIGNED_XPI="$(find .output/signed-firefox -maxdepth 1 -type f -name '*.xpi' | head -n 1)"
           if [ -z "${SIGNED_XPI}" ]; then
