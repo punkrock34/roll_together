@@ -1,0 +1,103 @@
+name: Extension Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Read package version
+        id: version
+        run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          EXPECTED_TAG="v${{ steps.version.outputs.value }}"
+          if [ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${EXPECTED_TAG}."
+            exit 1
+          fi
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=v${{ steps.version.outputs.value }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: |
+          npm run lint
+          npm run check
+          npm run test
+
+      - name: Build release archives
+        run: |
+          npm run zip:chrome
+          npm run zip:firefox
+
+      - name: Sign Firefox XPI for self-distribution
+        if: ${{ secrets.AMO_API_KEY != '' && secrets.AMO_API_SECRET != '' }}
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+        run: |
+          npx web-ext@8 sign \
+            --channel=unlisted \
+            --source-dir=.output/firefox-mv3 \
+            --artifacts-dir=.output/signed-firefox
+
+          SIGNED_XPI="$(find .output/signed-firefox -maxdepth 1 -type f -name '*.xpi' | head -n 1)"
+          if [ -z "${SIGNED_XPI}" ]; then
+            echo "Signed Firefox XPI was not created."
+            exit 1
+          fi
+
+          cp "${SIGNED_XPI}" ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi"
+
+      - name: Collect release assets
+        run: |
+          mkdir -p .release-assets
+          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-chrome.zip" .release-assets/
+          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox.zip" .release-assets/
+          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-sources.zip" .release-assets/
+
+          if [ -f ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi" ]; then
+            cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi" .release-assets/
+          fi
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.tag.outputs.value }}" >/dev/null 2>&1; then
+            gh release upload "${{ steps.tag.outputs.value }}" .release-assets/* --clobber
+          else
+            gh release create "${{ steps.tag.outputs.value }}" .release-assets/* \
+              --title "Roll Together v${{ steps.version.outputs.value }}" \
+              --target "${GITHUB_SHA}" \
+              --generate-notes
+          fi

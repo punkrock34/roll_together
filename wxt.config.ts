@@ -11,7 +11,7 @@ export default defineConfig({
     short_name: "Roll Together",
     description:
       "Anonymous Crunchyroll watch parties with local-first progress and a self-hosted backend.",
-    version: "4.2.1",
+    version: "4.2.3",
     permissions: ["storage", "tabs"],
     host_permissions: crunchyrollMatches,
     minimum_chrome_version: "116",
@@ -20,10 +20,13 @@ export default defineConfig({
         ? {
             gecko: {
               id: "roll-together-v2@rolltogether.app",
-              strict_min_version: "128.0",
+              strict_min_version: "140.0",
               data_collection_permissions: {
                 required: ["none"],
               },
+            },
+            gecko_android: {
+              strict_min_version: "142.0",
             },
           }
         : undefined,
