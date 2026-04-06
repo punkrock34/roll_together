@@ -23,6 +23,151 @@ const THEME_LABELS: Record<ThemeMode, string> = {
   dark: "Dark",
 };
 
+function createElement<K extends keyof HTMLElementTagNameMap>(
+  tagName: K,
+  options: {
+    className?: string;
+    text?: string;
+    id?: string;
+    type?: string;
+  } = {},
+) {
+  const element = document.createElement(tagName);
+
+  if (options.className) {
+    element.className = options.className;
+  }
+
+  if (options.text !== undefined) {
+    element.textContent = options.text;
+  }
+
+  if (options.id) {
+    element.id = options.id;
+  }
+
+  if ("type" in element && options.type) {
+    (element as HTMLInputElement).type = options.type;
+  }
+
+  return element;
+}
+
+function appendChildren(parent: Node, children: Array<Node | undefined>) {
+  for (const child of children) {
+    if (child) {
+      parent.appendChild(child);
+    }
+  }
+}
+
+function createSectionHead(title: string, description: string) {
+  const head = createElement("div", { className: "section-head" });
+  const copy = createElement("div");
+  appendChildren(copy, [
+    createElement("h2", { text: title }),
+    createElement("p", { className: "muted", text: description }),
+  ]);
+  head.appendChild(copy);
+  return head;
+}
+
+function createLabelledInput(
+  labelText: string,
+  id: string,
+  value: string,
+  type = "text",
+) {
+  const label = createElement("label");
+  label.append(labelText);
+  const input = createElement("input", { id, type }) as HTMLInputElement;
+  input.value = value;
+  label.appendChild(input);
+  return label;
+}
+
+function createThemeSelect(themeMode: ThemeMode) {
+  const label = createElement("label");
+  label.append("Theme");
+  const select = createElement("select", { id: "themeMode" });
+
+  for (const mode of ["system", "light", "dark"] as ThemeMode[]) {
+    const option = createElement("option", { text: THEME_LABELS[mode] });
+    option.setAttribute("value", mode);
+    option.selected = mode === themeMode;
+    select.appendChild(option);
+  }
+
+  label.appendChild(select);
+  return label;
+}
+
+function createButton(
+  text: string,
+  className: string,
+  id?: string,
+  dataset?: Record<string, string>,
+) {
+  const button = createElement("button", { className, text, id });
+  button.setAttribute("type", "button");
+
+  if (dataset) {
+    for (const [key, value] of Object.entries(dataset)) {
+      button.dataset[key] = value;
+    }
+  }
+
+  return button;
+}
+
+function createRoomItem(room: RecentRoomEntry) {
+  const title = room.label ?? room.episodeTitle;
+  const item = createElement("li", { className: "room-item" });
+  item.dataset.roomId = room.roomId;
+
+  const head = createElement("div", { className: "room-item-head" });
+  const copy = createElement("div");
+  appendChildren(copy, [
+    createElement("strong", { text: title }),
+    room.label
+      ? createElement("p", { className: "muted", text: room.episodeTitle })
+      : undefined,
+  ]);
+
+  const pill = createElement("span", {
+    className: "room-pill",
+    text: room.roomId,
+  });
+  appendChildren(head, [copy, pill]);
+
+  const url = createElement("span", { className: "muted clamp" });
+  url.textContent = room.shareUrl;
+
+  const actions = createElement("div", { className: "actions" });
+  appendChildren(actions, [
+    createButton("Open", "secondary", undefined, { roomOpen: room.roomId }),
+    createButton("Copy", "secondary", undefined, { roomCopy: room.roomId }),
+    createButton("Rename", "secondary", undefined, {
+      roomRename: room.roomId,
+    }),
+    createButton("Delete", "secondary danger", undefined, {
+      roomDelete: room.roomId,
+    }),
+  ]);
+
+  appendChildren(item, [head, url, actions]);
+  return item;
+}
+
+function createWatchProgressItem(title: string, durationLabel: string) {
+  const item = createElement("li");
+  appendChildren(item, [
+    createElement("strong", { text: title }),
+    createElement("span", { className: "muted", text: durationLabel }),
+  ]);
+  return item;
+}
+
 async function render(
   status = "Adjust backend settings, local history, and theme preferences here.",
 ) {
@@ -36,125 +181,99 @@ async function render(
 
   applyThemeMode(settings.themeMode);
 
-  app.innerHTML = `
-    <main>
-      <section class="card header-card">
-        <div>
-          <span class="eyebrow">Roll Together</span>
-          <h1>Settings</h1>
-        </div>
-        <p class="muted">${status}</p>
-      </section>
+  const main = createElement("main");
 
-      <section class="card">
-        <div class="section-head">
-          <div>
-            <h2>Connection</h2>
-            <p class="muted">Point the extension at any backend you want to use.</p>
-          </div>
-        </div>
+  const headerCard = createElement("section", {
+    className: "card header-card",
+  });
+  const headerCopy = createElement("div");
+  appendChildren(headerCopy, [
+    createElement("span", { className: "eyebrow", text: "Roll Together" }),
+    createElement("h1", { text: "Settings" }),
+  ]);
+  appendChildren(headerCard, [
+    headerCopy,
+    createElement("p", { className: "muted", text: status }),
+  ]);
 
-        <label>
-          HTTP Base URL
-          <input id="httpUrl" value="${settings.backendHttpUrl}" />
-        </label>
+  const connectionCard = createElement("section", { className: "card" });
+  const connectionActions = createElement("div", { className: "actions" });
+  appendChildren(connectionActions, [
+    createButton("Save Settings", "primary", "saveSettings"),
+    createButton("Restore Defaults", "secondary", "resetSettings"),
+  ]);
+  appendChildren(connectionCard, [
+    createSectionHead(
+      "Connection",
+      "Point the extension at any backend you want to use.",
+    ),
+    createLabelledInput("HTTP Base URL", "httpUrl", settings.backendHttpUrl),
+    createLabelledInput("WebSocket URL", "wsUrl", settings.backendWsUrl),
+    createThemeSelect(settings.themeMode),
+    connectionActions,
+  ]);
 
-        <label>
-          WebSocket URL
-          <input id="wsUrl" value="${settings.backendWsUrl}" />
-        </label>
+  const roomsCard = createElement("section", { className: "card" });
+  appendChildren(roomsCard, [
+    createSectionHead(
+      "Saved Rooms",
+      "Rename, reopen, copy, or remove locally saved room shortcuts.",
+    ),
+  ]);
 
-        <label>
-          Theme
-          <select id="themeMode">
-            ${(["system", "light", "dark"] as ThemeMode[])
-              .map(
-                (mode) => `
-                  <option value="${mode}" ${settings.themeMode === mode ? "selected" : ""}>
-                    ${THEME_LABELS[mode]}
-                  </option>
-                `,
-              )
-              .join("")}
-          </select>
-        </label>
+  if (recentRooms.length > 0) {
+    const list = createElement("ul", { className: "list" });
+    for (const room of recentRooms) {
+      list.appendChild(createRoomItem(room));
+    }
+    roomsCard.appendChild(list);
+  } else {
+    roomsCard.appendChild(
+      createElement("p", { className: "muted", text: "No room history yet." }),
+    );
+  }
 
-        <div class="actions">
-          <button class="primary" id="saveSettings">Save Settings</button>
-          <button class="secondary" id="resetSettings">Restore Defaults</button>
-        </div>
-      </section>
+  const progressCard = createElement("section", { className: "card" });
+  appendChildren(progressCard, [
+    createSectionHead(
+      "Watched Progress",
+      "Playback snapshots stay local to your browser profile.",
+    ),
+  ]);
 
-      <section class="card">
-        <div class="section-head">
-          <div>
-            <h2>Saved Rooms</h2>
-            <p class="muted">Rename, reopen, copy, or remove locally saved room shortcuts.</p>
-          </div>
-        </div>
+  if (watchProgress.length > 0) {
+    const list = createElement("ul", { className: "list" });
+    for (const entry of watchProgress) {
+      const durationLabel =
+        entry.durationSeconds === null
+          ? "Unknown duration"
+          : `${Math.floor(entry.progressSeconds / 60)}m / ${Math.floor(
+              entry.durationSeconds / 60,
+            )}m`;
+      list.appendChild(
+        createWatchProgressItem(entry.episodeTitle, durationLabel),
+      );
+    }
+    progressCard.appendChild(list);
+  } else {
+    progressCard.appendChild(
+      createElement("p", {
+        className: "muted",
+        text: "Playback snapshots will be stored locally once you start using the extension.",
+      }),
+    );
+  }
 
-        ${
-          recentRooms.length > 0
-            ? `<ul class="list">${recentRooms
-                .map((room) => renderRoomItem(room))
-                .join("")}</ul>`
-            : `<p class="muted">No room history yet.</p>`
-        }
-      </section>
+  const progressActions = createElement("div", { className: "actions" });
+  progressActions.appendChild(
+    createButton("Clear Local History", "secondary", "clearProgress"),
+  );
+  progressCard.appendChild(progressActions);
 
-      <section class="card">
-        <div class="section-head">
-          <div>
-            <h2>Watched Progress</h2>
-            <p class="muted">Playback snapshots stay local to your browser profile.</p>
-          </div>
-        </div>
-        ${
-          watchProgress.length > 0
-            ? `<ul class="list">${watchProgress
-                .map((entry) => {
-                  const durationLabel =
-                    entry.durationSeconds === null
-                      ? "Unknown duration"
-                      : `${Math.floor(entry.progressSeconds / 60)}m / ${Math.floor(
-                          entry.durationSeconds / 60,
-                        )}m`;
-                  return `<li><strong>${entry.episodeTitle}</strong><br /><span class="muted">${durationLabel}</span></li>`;
-                })
-                .join("")}</ul>`
-            : `<p class="muted">Playback snapshots will be stored locally once you start using the extension.</p>`
-        }
-        <div class="actions">
-          <button class="secondary" id="clearProgress">Clear Local History</button>
-        </div>
-      </section>
-    </main>
-  `;
+  appendChildren(main, [headerCard, connectionCard, roomsCard, progressCard]);
+  app.replaceChildren(main);
 
   bindEvents();
-}
-
-function renderRoomItem(room: RecentRoomEntry) {
-  const title = room.label ?? room.episodeTitle;
-
-  return `
-    <li class="room-item" data-room-id="${room.roomId}">
-      <div class="room-item-head">
-        <div>
-          <strong>${title}</strong>
-          ${room.label ? `<p class="muted">${room.episodeTitle}</p>` : ""}
-        </div>
-        <span class="room-pill">${room.roomId}</span>
-      </div>
-      <span class="muted clamp">${room.shareUrl}</span>
-      <div class="actions">
-        <button class="secondary" data-room-open="${room.roomId}">Open</button>
-        <button class="secondary" data-room-copy="${room.roomId}">Copy</button>
-        <button class="secondary" data-room-rename="${room.roomId}">Rename</button>
-        <button class="secondary danger" data-room-delete="${room.roomId}">Delete</button>
-      </div>
-    </li>
-  `;
 }
 
 function bindEvents() {

@@ -59,6 +59,82 @@ let popupStateResolvers: Array<
   (state: PopupStateResponse | undefined) => void
 > = [];
 
+function createElement<K extends keyof HTMLElementTagNameMap>(
+  tagName: K,
+  options: {
+    className?: string;
+    text?: string;
+    id?: string;
+    type?: string;
+  } = {},
+) {
+  const element = document.createElement(tagName);
+
+  if (options.className) {
+    element.className = options.className;
+  }
+
+  if (options.text !== undefined) {
+    element.textContent = options.text;
+  }
+
+  if (options.id) {
+    element.id = options.id;
+  }
+
+  if ("type" in element && options.type) {
+    (element as HTMLInputElement).type = options.type;
+  }
+
+  return element;
+}
+
+function appendChildren(parent: Node, children: Array<Node | undefined>) {
+  for (const child of children) {
+    if (child) {
+      parent.appendChild(child);
+    }
+  }
+}
+
+function createButton(
+  text: string,
+  className: string,
+  options: {
+    action?: string;
+    tab?: PopupTab;
+    roomIdKey?:
+      | "roomOpen"
+      | "roomCopy"
+      | "roomRename"
+      | "roomDelete"
+      | "roomSave";
+    roomId?: string;
+    id?: string;
+  } = {},
+) {
+  const button = createElement("button", {
+    className,
+    text,
+    id: options.id,
+  });
+  button.setAttribute("type", "button");
+
+  if (options.action) {
+    button.dataset.action = options.action;
+  }
+
+  if (options.tab) {
+    button.dataset.tab = options.tab;
+  }
+
+  if (options.roomIdKey && options.roomId) {
+    button.dataset[options.roomIdKey] = options.roomId;
+  }
+
+  return button;
+}
+
 function roomStatusLabel(state: PopupStateResponse) {
   if (!state.supported) {
     return "Unsupported";
@@ -348,199 +424,332 @@ async function loadViewModel(): Promise<PopupViewModel> {
   };
 }
 
-function renderTabs(activeTab: PopupTab) {
-  const tabs: PopupTab[] = ["home", "rooms", "settings"];
-  return tabs
-    .map(
-      (tab) => `
-        <button class="tab ${activeTab === tab ? "is-active" : ""}" data-tab="${tab}">
-          ${TAB_LABELS[tab]}
-        </button>
-      `,
-    )
-    .join("");
+function createTopbar(view: PopupViewModel) {
+  const topbar = createElement("header", { className: "topbar" });
+  const left = createElement("div");
+  appendChildren(left, [
+    createElement("span", { className: "eyebrow", text: "Roll Together" }),
+    createElement("strong", {
+      className: "topbar-title",
+      text: view.popupState.roomId ? view.popupState.roomId : "Watch parties",
+    }),
+  ]);
+
+  const right = uiState.notice
+    ? createElement("span", { className: "flash", text: uiState.notice })
+    : createElement("span", {
+        className: "topbar-muted",
+        text: view.popupState.supported
+          ? "Supported tab"
+          : "Waiting for a supported tab",
+      });
+
+  appendChildren(topbar, [left, right]);
+  return topbar;
 }
 
-function renderHome(view: PopupViewModel) {
+function createTabs(activeTab: PopupTab) {
+  const nav = createElement("nav", { className: "tabs" });
+
+  for (const tab of ["home", "rooms", "settings"] as PopupTab[]) {
+    nav.appendChild(
+      createButton(
+        TAB_LABELS[tab],
+        `tab ${activeTab === tab ? "is-active" : ""}`.trim(),
+        { tab },
+      ),
+    );
+  }
+
+  return nav;
+}
+
+function createField(labelText: string, input: HTMLElement) {
+  const label = createElement("label", { className: "field" });
+  label.appendChild(createElement("span", { text: labelText }));
+  label.appendChild(input);
+  return label;
+}
+
+function createMetaCard(label: string, value: string) {
+  const card = createElement("div", { className: "meta-card" });
+  appendChildren(card, [
+    createElement("span", { className: "meta-label", text: label }),
+    createElement("strong", { text: value }),
+  ]);
+  return card;
+}
+
+function createHomePanel(view: PopupViewModel) {
   const { popupState } = view;
   const summary = describeHomeState(popupState);
-  const shareUrl = popupState.shareUrl;
+  const panel = createElement("section", { className: "panel hero-panel" });
 
-  return `
-    <section class="panel hero-panel">
-      <div class="eyebrow-row">
-        <span class="eyebrow">Current Room</span>
-        <span class="status-chip status-${popupState.connectionState}">${roomStatusLabel(popupState)}</span>
-      </div>
-      <h1>${summary.title}</h1>
-      <p class="muted">${summary.body}</p>
+  const eyebrowRow = createElement("div", { className: "eyebrow-row" });
+  appendChildren(eyebrowRow, [
+    createElement("span", { className: "eyebrow", text: "Current Room" }),
+    createElement("span", {
+      className: `status-chip status-${popupState.connectionState}`,
+      text: roomStatusLabel(popupState),
+    }),
+  ]);
 
-      <div class="meta-grid">
-        <div class="meta-card">
-          <span class="meta-label">Participants</span>
-          <strong>${popupState.roomId ? popupState.participantCount : 0}</strong>
-        </div>
-        <div class="meta-card">
-          <span class="meta-label">Role</span>
-          <strong>${popupState.roomId ? (popupState.isHost ? "Host" : "Viewer") : "None"}</strong>
-        </div>
-      </div>
+  const metaGrid = createElement("div", { className: "meta-grid" });
+  appendChildren(metaGrid, [
+    createMetaCard(
+      "Participants",
+      `${popupState.roomId ? popupState.participantCount : 0}`,
+    ),
+    createMetaCard(
+      "Role",
+      popupState.roomId ? (popupState.isHost ? "Host" : "Viewer") : "None",
+    ),
+  ]);
 
-      ${
-        shareUrl
-          ? `<label class="field">
-              <span>Invite Link</span>
-              <input class="share-input" readonly value="${shareUrl}" />
-            </label>`
-          : ""
-      }
+  const actionRow = createElement("div", { className: "action-row" });
+  if (canCreateRoom(popupState)) {
+    actionRow.appendChild(
+      createButton("Create Room", "primary grow", { action: "create-room" }),
+    );
+  }
+  if (canReconnectRoom(popupState)) {
+    actionRow.appendChild(
+      createButton("Reconnect", "primary grow", { action: "reconnect-room" }),
+    );
+  }
+  if (popupState.roomId) {
+    actionRow.appendChild(
+      createButton("Copy Link", "secondary", { action: "copy-room-link" }),
+    );
+    actionRow.appendChild(
+      createButton("Leave Room", "secondary", { action: "leave-room" }),
+    );
+  }
 
-      <div class="action-row">
-        ${
-          canCreateRoom(popupState)
-            ? `<button class="primary grow" data-action="create-room">Create Room</button>`
-            : ""
-        }
-        ${
-          canReconnectRoom(popupState)
-            ? `<button class="primary grow" data-action="reconnect-room">Reconnect</button>`
-            : ""
-        }
-        ${
-          popupState.roomId
-            ? `<button class="secondary" data-action="copy-room-link">Copy Link</button>
-               <button class="secondary" data-action="leave-room">Leave Room</button>`
-            : ""
-        }
-      </div>
+  appendChildren(panel, [
+    eyebrowRow,
+    createElement("h1", { text: summary.title }),
+    createElement("p", { className: "muted", text: summary.body }),
+    metaGrid,
+  ]);
 
-      ${
-        popupState.lastError && popupState.connectionState === "error"
-          ? `<p class="notice error">${popupState.lastError}</p>`
-          : `<p class="muted">Backend: ${popupState.backendWsUrl}</p>`
-      }
-    </section>
-  `;
+  if (popupState.shareUrl) {
+    const input = createElement("input", {
+      className: "share-input",
+      type: "text",
+    }) as HTMLInputElement;
+    input.readOnly = true;
+    input.value = popupState.shareUrl;
+    panel.appendChild(createField("Invite Link", input));
+  }
+
+  panel.appendChild(actionRow);
+
+  if (popupState.lastError && popupState.connectionState === "error") {
+    panel.appendChild(
+      createElement("p", {
+        className: "notice error",
+        text: popupState.lastError,
+      }),
+    );
+  } else {
+    panel.appendChild(
+      createElement("p", {
+        className: "muted",
+        text: `Backend: ${popupState.backendWsUrl}`,
+      }),
+    );
+  }
+
+  return panel;
 }
 
-function renderRoomCard(room: RecentRoomEntry, expanded = false) {
+function createRoomCard(room: RecentRoomEntry, expanded = false) {
   const title = room.label ?? room.episodeTitle;
-  return `
-    <article class="room-card ${expanded ? "room-card-wide" : ""}" data-room-id="${room.roomId}">
-      <div class="room-card-head">
-        <div>
-          <strong>${title}</strong>
-          ${room.label ? `<p class="muted">${room.episodeTitle}</p>` : ""}
-        </div>
-        <span class="room-pill">${room.roomId}</span>
-      </div>
-      <p class="muted clamp">${room.shareUrl}</p>
-      <div class="inline-actions">
-        <button class="secondary" data-room-open="${room.roomId}">Open</button>
-        <button class="secondary" data-room-copy="${room.roomId}">Copy</button>
-        <button class="secondary" data-room-rename="${room.roomId}">Rename</button>
-        <button class="secondary danger" data-room-delete="${room.roomId}">Delete</button>
-      </div>
-      ${
-        uiState.editingRoomId === room.roomId
-          ? `<div class="edit-row">
-              <input id="rename-room-input" value="${title}" />
-              <button class="primary" data-room-save="${room.roomId}">Save</button>
-              <button class="secondary" data-room-cancel>Cancel</button>
-            </div>`
-          : ""
-      }
-    </article>
-  `;
+  const card = createElement("article", {
+    className: `room-card ${expanded ? "room-card-wide" : ""}`.trim(),
+  });
+  card.dataset.roomId = room.roomId;
+
+  const head = createElement("div", { className: "room-card-head" });
+  const copy = createElement("div");
+  appendChildren(copy, [
+    createElement("strong", { text: title }),
+    room.label
+      ? createElement("p", { className: "muted", text: room.episodeTitle })
+      : undefined,
+  ]);
+
+  appendChildren(head, [
+    copy,
+    createElement("span", { className: "room-pill", text: room.roomId }),
+  ]);
+
+  const url = createElement("p", { className: "muted clamp" });
+  url.textContent = room.shareUrl;
+
+  const actions = createElement("div", { className: "inline-actions" });
+  appendChildren(actions, [
+    createButton("Open", "secondary", {
+      roomIdKey: "roomOpen",
+      roomId: room.roomId,
+    }),
+    createButton("Copy", "secondary", {
+      roomIdKey: "roomCopy",
+      roomId: room.roomId,
+    }),
+    createButton("Rename", "secondary", {
+      roomIdKey: "roomRename",
+      roomId: room.roomId,
+    }),
+    createButton("Delete", "secondary danger", {
+      roomIdKey: "roomDelete",
+      roomId: room.roomId,
+    }),
+  ]);
+
+  appendChildren(card, [head, url, actions]);
+
+  if (uiState.editingRoomId === room.roomId) {
+    const editRow = createElement("div", { className: "edit-row" });
+    const input = createElement("input", {
+      id: "rename-room-input",
+      type: "text",
+    }) as HTMLInputElement;
+    input.value = title;
+
+    appendChildren(editRow, [
+      input,
+      createButton("Save", "primary", {
+        action: "save-room",
+        roomIdKey: "roomSave",
+      }),
+      createButton("Cancel", "secondary", { action: "cancel-room-rename" }),
+    ]);
+
+    const saveButton = editRow.querySelector<HTMLButtonElement>(
+      "[data-action='save-room']",
+    );
+    if (saveButton) {
+      saveButton.dataset.roomSave = room.roomId;
+    }
+
+    card.appendChild(editRow);
+  }
+
+  return card;
 }
 
-function renderRooms(view: PopupViewModel) {
+function createRoomsPanel(view: PopupViewModel) {
   const recent = view.recentRooms;
   const featuredRooms = recent.slice(0, 3);
+  const panel = createElement("section", { className: "panel" });
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h2>Recent Rooms</h2>
-          <p class="muted">Local shortcuts for rooms you recently created or joined.</p>
-        </div>
-      </div>
+  const head = createElement("div", { className: "section-head" });
+  const copy = createElement("div");
+  appendChildren(copy, [
+    createElement("h2", { text: "Recent Rooms" }),
+    createElement("p", {
+      className: "muted",
+      text: "Local shortcuts for rooms you recently created or joined.",
+    }),
+  ]);
+  head.appendChild(copy);
+  panel.appendChild(head);
 
-      ${
-        featuredRooms.length > 0
-          ? `<div class="room-grid">${featuredRooms
-              .map((room) => renderRoomCard(room))
-              .join("")}</div>`
-          : `<div class="empty-state">
-              <strong>No rooms saved yet</strong>
-              <p class="muted">Create or join a room and it will show up here for quick reopening.</p>
-            </div>`
-      }
+  if (featuredRooms.length > 0) {
+    const grid = createElement("div", { className: "room-grid" });
+    for (const room of featuredRooms) {
+      grid.appendChild(createRoomCard(room));
+    }
+    panel.appendChild(grid);
+  } else {
+    const empty = createElement("div", { className: "empty-state" });
+    appendChildren(empty, [
+      createElement("strong", { text: "No rooms saved yet" }),
+      createElement("p", {
+        className: "muted",
+        text: "Create or join a room and it will show up here for quick reopening.",
+      }),
+    ]);
+    panel.appendChild(empty);
+  }
 
-      ${
-        recent.length > 3
-          ? `<div class="subsection">
-              <div class="section-head compact">
-                <h3>All Saved Rooms</h3>
-              </div>
-              <div class="room-list">${recent
-                .map((room) => renderRoomCard(room, true))
-                .join("")}</div>
-            </div>`
-          : ""
-      }
-    </section>
-  `;
+  if (recent.length > 3) {
+    const subsection = createElement("div", { className: "subsection" });
+    const compactHead = createElement("div", {
+      className: "section-head compact",
+    });
+    compactHead.appendChild(createElement("h3", { text: "All Saved Rooms" }));
+
+    const list = createElement("div", { className: "room-list" });
+    for (const room of recent) {
+      list.appendChild(createRoomCard(room, true));
+    }
+
+    appendChildren(subsection, [compactHead, list]);
+    panel.appendChild(subsection);
+  }
+
+  return panel;
 }
 
-function renderSettings(view: PopupViewModel) {
+function createSettingsPanel(view: PopupViewModel) {
   const { settings } = view;
+  const panel = createElement("section", { className: "panel" });
+  const head = createElement("div", { className: "section-head" });
+  const copy = createElement("div");
+  appendChildren(copy, [
+    createElement("h2", { text: "Settings" }),
+    createElement("p", {
+      className: "muted",
+      text: "Switch backends, pick a theme, and keep the extension pointed at your own setup.",
+    }),
+  ]);
+  head.appendChild(copy);
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h2>Settings</h2>
-          <p class="muted">Switch backends, pick a theme, and keep the extension pointed at your own setup.</p>
-        </div>
-      </div>
+  const httpInput = createElement("input", {
+    id: "settings-http-url",
+    type: "text",
+  }) as HTMLInputElement;
+  httpInput.value = settings.backendHttpUrl;
 
-      <label class="field">
-        <span>HTTP Base URL</span>
-        <input id="settings-http-url" value="${settings.backendHttpUrl}" />
-      </label>
+  const wsInput = createElement("input", {
+    id: "settings-ws-url",
+    type: "text",
+  }) as HTMLInputElement;
+  wsInput.value = settings.backendWsUrl;
 
-      <label class="field">
-        <span>WebSocket URL</span>
-        <input id="settings-ws-url" value="${settings.backendWsUrl}" />
-      </label>
+  const select = createElement("select", {
+    id: "settings-theme-mode",
+  }) as HTMLSelectElement;
+  for (const mode of ["system", "light", "dark"] as ThemeMode[]) {
+    const option = createElement("option", { text: THEME_LABELS[mode] });
+    option.value = mode;
+    option.selected = settings.themeMode === mode;
+    select.appendChild(option);
+  }
 
-      <label class="field">
-        <span>Theme</span>
-        <select id="settings-theme-mode">
-          ${(["system", "light", "dark"] as ThemeMode[])
-            .map(
-              (mode) => `
-                <option value="${mode}" ${settings.themeMode === mode ? "selected" : ""}>
-                  ${THEME_LABELS[mode]}
-                </option>
-              `,
-            )
-            .join("")}
-        </select>
-      </label>
+  const actionRow = createElement("div", { className: "action-row" });
+  appendChildren(actionRow, [
+    createButton("Save Settings", "primary grow", { action: "save-settings" }),
+    createButton("Restore Defaults", "secondary", {
+      action: "reset-settings",
+    }),
+  ]);
 
-      <div class="action-row">
-        <button class="primary grow" data-action="save-settings">Save Settings</button>
-        <button class="secondary" data-action="reset-settings">Restore Defaults</button>
-      </div>
+  appendChildren(panel, [
+    head,
+    createField("HTTP Base URL", httpInput),
+    createField("WebSocket URL", wsInput),
+    createField("Theme", select),
+    actionRow,
+    createButton("Open full settings page", "link-button", {
+      action: "open-options",
+    }),
+  ]);
 
-      <button class="link-button" data-action="open-options">
-        Open full settings page
-      </button>
-    </section>
-  `;
+  return panel;
 }
 
 function renderShell(view: PopupViewModel) {
@@ -548,31 +757,23 @@ function renderShell(view: PopupViewModel) {
     return;
   }
 
-  app.innerHTML = `
-    <div class="shell">
-      <header class="topbar">
-        <div>
-          <span class="eyebrow">Roll Together</span>
-          <strong class="topbar-title">${
-            view.popupState.roomId ? view.popupState.roomId : "Watch parties"
-          }</strong>
-        </div>
-        ${
-          uiState.notice
-            ? `<span class="flash">${uiState.notice}</span>`
-            : `<span class="topbar-muted">${view.popupState.supported ? "Supported tab" : "Waiting for a supported tab"}</span>`
-        }
-      </header>
+  const shell = createElement("div", { className: "shell" });
+  const panels = createElement("main", { className: "tab-panels" });
 
-      <nav class="tabs">${renderTabs(uiState.activeTab)}</nav>
+  appendChildren(shell, [createTopbar(view), createTabs(uiState.activeTab)]);
 
-      <main class="tab-panels">
-        ${uiState.activeTab === "home" ? renderHome(view) : ""}
-        ${uiState.activeTab === "rooms" ? renderRooms(view) : ""}
-        ${uiState.activeTab === "settings" ? renderSettings(view) : ""}
-      </main>
-    </div>
-  `;
+  if (uiState.activeTab === "home") {
+    panels.appendChild(createHomePanel(view));
+  }
+  if (uiState.activeTab === "rooms") {
+    panels.appendChild(createRoomsPanel(view));
+  }
+  if (uiState.activeTab === "settings") {
+    panels.appendChild(createSettingsPanel(view));
+  }
+
+  shell.appendChild(panels);
+  app.replaceChildren(shell);
 }
 
 async function render() {
@@ -786,7 +987,7 @@ function bindEvents(view: PopupViewModel) {
     });
 
   app
-    .querySelector<HTMLButtonElement>("[data-room-cancel]")
+    .querySelector<HTMLButtonElement>("[data-action='cancel-room-rename']")
     ?.addEventListener("click", async () => {
       uiState.editingRoomId = undefined;
       await render();
