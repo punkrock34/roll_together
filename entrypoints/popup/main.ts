@@ -1,7 +1,10 @@
 import "./style.css";
 
 import { browser, getActiveTab } from "../../src/platform/browser";
-import { POPUP_PORT_NAME } from "../../src/core/messages";
+import {
+  POPUP_PORT_NAME,
+  POPUP_STATE_PORT_NAME,
+} from "../../src/core/messages";
 import {
   DEFAULT_SETTINGS,
   deleteRecentRoom,
@@ -35,7 +38,6 @@ interface PopupUiState {
 }
 
 const app = document.querySelector<HTMLDivElement>("#app");
-const POPUP_MESSAGE_RETRY_DELAY_MS = 150;
 const TAB_LABELS: Record<PopupTab, string> = {
   home: "Home",
   rooms: "Rooms",
@@ -50,6 +52,12 @@ const THEME_LABELS: Record<ThemeMode, string> = {
 const uiState: PopupUiState = {
   activeTab: "home",
 };
+let popupStatePort: ReturnType<typeof browser.runtime.connect> | undefined;
+let livePopupState: PopupStateResponse | undefined;
+let renderQueued = false;
+let popupStateResolvers: Array<
+  (state: PopupStateResponse | undefined) => void
+> = [];
 
 function roomStatusLabel(state: PopupStateResponse) {
   if (!state.supported) {
@@ -193,15 +201,83 @@ async function sendPopupMessage<TResponse>(message: PopupRequestMessage) {
   });
 }
 
-async function waitForBackground() {
-  await new Promise<void>((resolve) => {
-    window.setTimeout(resolve, POPUP_MESSAGE_RETRY_DELAY_MS);
-  });
-}
-
 async function copyToClipboard(value: string, notice: string) {
   await navigator.clipboard.writeText(value);
   uiState.notice = notice;
+}
+
+function resolvePopupStateWaiters(state: PopupStateResponse | undefined) {
+  const waiters = popupStateResolvers;
+  popupStateResolvers = [];
+  for (const waiter of waiters) {
+    waiter(state);
+  }
+}
+
+function queueRender() {
+  if (renderQueued) {
+    return;
+  }
+
+  renderQueued = true;
+  window.setTimeout(() => {
+    renderQueued = false;
+    void render();
+  }, 0);
+}
+
+function connectPopupStatePort() {
+  if (popupStatePort) {
+    return popupStatePort;
+  }
+
+  const port = browser.runtime.connect({ name: POPUP_STATE_PORT_NAME });
+  popupStatePort = port;
+
+  port.onMessage.addListener((response) => {
+    livePopupState = response as PopupStateResponse;
+    resolvePopupStateWaiters(livePopupState);
+    applyThemeMode(livePopupState.themeMode);
+    if (app) {
+      queueRender();
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (popupStatePort === port) {
+      popupStatePort = undefined;
+    }
+    resolvePopupStateWaiters(livePopupState);
+  });
+
+  return port;
+}
+
+async function waitForLivePopupState(timeoutMs = 500) {
+  connectPopupStatePort();
+
+  if (livePopupState) {
+    return livePopupState;
+  }
+
+  return new Promise<PopupStateResponse | undefined>((resolve) => {
+    const waiter = (state: PopupStateResponse | undefined) => {
+      window.clearTimeout(timeoutId);
+      popupStateResolvers = popupStateResolvers.filter(
+        (candidate) => candidate !== waiter,
+      );
+      resolve(state);
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      popupStateResolvers = popupStateResolvers.filter(
+        (candidate) => candidate !== waiter,
+      );
+      resolve(undefined);
+    }, timeoutMs);
+
+    popupStateResolvers.push(waiter);
+  });
 }
 
 async function createFallbackState(
@@ -255,24 +331,20 @@ async function loadViewModel(): Promise<PopupViewModel> {
   ]);
 
   const fallbackState = await createFallbackState(settings, recentRooms);
-  let popupState = await sendPopupMessage<PopupStateResponse>({
-    type: "popup:get-active-tab-state",
-  });
-
-  if (!popupState) {
-    await waitForBackground();
-    popupState = await sendPopupMessage<PopupStateResponse>({
-      type: "popup:get-active-tab-state",
-    });
-  }
-
-  const normalizedState = normalizePopupState(popupState, fallbackState);
-  applyThemeMode(settings.themeMode);
+  const normalizedState = normalizePopupState(
+    await waitForLivePopupState(),
+    fallbackState,
+  );
+  applyThemeMode(normalizedState.themeMode);
 
   return {
     popupState: normalizedState,
-    settings,
-    recentRooms,
+    settings: {
+      backendHttpUrl: normalizedState.backendHttpUrl,
+      backendWsUrl: normalizedState.backendWsUrl,
+      themeMode: normalizedState.themeMode,
+    },
+    recentRooms: normalizedState.recentRooms,
   };
 }
 
@@ -535,10 +607,13 @@ function bindEvents(view: PopupViewModel) {
         return;
       }
 
-      await sendPopupMessage<PopupStateResponse>({
+      const nextState = await sendPopupMessage<PopupStateResponse>({
         type: "popup:create-room",
         tabId: activeTab.id,
       });
+      if (nextState) {
+        livePopupState = nextState;
+      }
       uiState.notice = "Room created.";
       await render();
     });
@@ -551,10 +626,13 @@ function bindEvents(view: PopupViewModel) {
         return;
       }
 
-      await sendPopupMessage<PopupStateResponse>({
+      const nextState = await sendPopupMessage<PopupStateResponse>({
         type: "popup:create-room",
         tabId: activeTab.id,
       });
+      if (nextState) {
+        livePopupState = nextState;
+      }
       uiState.notice = "Room reconnected.";
       await render();
     });
@@ -578,10 +656,13 @@ function bindEvents(view: PopupViewModel) {
         return;
       }
 
-      await sendPopupMessage<PopupStateResponse>({
+      const nextState = await sendPopupMessage<PopupStateResponse>({
         type: "popup:disconnect-room",
         tabId: activeTab.id,
       });
+      if (nextState) {
+        livePopupState = nextState;
+      }
       uiState.notice = "Left the room.";
       await render();
     });

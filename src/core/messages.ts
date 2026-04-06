@@ -3,6 +3,7 @@ import type { RecentRoomEntry, ThemeMode, WatchProgressEntry } from "./storage";
 
 export const CONTENT_PORT_NAME = "roll-together-content";
 export const POPUP_PORT_NAME = "roll-together-popup";
+export const POPUP_STATE_PORT_NAME = "roll-together-popup-state";
 
 export type RoomConnectionStatus =
   | "unsupported"

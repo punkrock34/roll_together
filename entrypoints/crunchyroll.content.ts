@@ -19,6 +19,9 @@ export default defineContentScript({
   allFrames: true,
   runAt: "document_idle",
   main() {
+    const FAST_SCAN_DELAYS_MS = [0, 50, 125, 250, 500, 900, 1_400];
+    const FALLBACK_SCAN_INTERVAL_MS = 2_000;
+    const PAGE_KEY_POLL_INTERVAL_MS = 1_000;
     const port = browser.runtime.connect({ name: CONTENT_PORT_NAME });
 
     let player: HTMLVideoElement | null = null;
@@ -26,6 +29,7 @@ export default defineContentScript({
     let ignoreLocalEventsUntil = 0;
     let lastBroadcastAt = 0;
     let scanQueued = false;
+    let scanBurstTimeoutIds: number[] = [];
     let lastPageKey = `${window.location.href}|${document.title}`;
 
     const buildSnapshot = (): PlaybackSnapshot | null => {
@@ -106,6 +110,7 @@ export default defineContentScript({
       }
 
       detachPlayer();
+      clearScanBurst();
       player = candidate;
       const cleanups: Array<() => void> = [];
 
@@ -143,6 +148,13 @@ export default defineContentScript({
       postSnapshot("initial");
     };
 
+    const clearScanBurst = () => {
+      for (const timeoutId of scanBurstTimeoutIds) {
+        window.clearTimeout(timeoutId);
+      }
+      scanBurstTimeoutIds = [];
+    };
+
     const scanForPlayer = () => {
       if (player?.isConnected) {
         return;
@@ -158,6 +170,21 @@ export default defineContentScript({
       }
     };
 
+    const scheduleScanBurst = () => {
+      clearScanBurst();
+
+      for (const delayMs of FAST_SCAN_DELAYS_MS) {
+        const timeoutId = window.setTimeout(() => {
+          scanForPlayer();
+          if (player) {
+            clearScanBurst();
+          }
+        }, delayMs);
+
+        scanBurstTimeoutIds.push(timeoutId);
+      }
+    };
+
     const scheduleScan = () => {
       if (scanQueued) {
         return;
@@ -167,8 +194,59 @@ export default defineContentScript({
       window.setTimeout(() => {
         scanQueued = false;
         scanForPlayer();
+        if (!player) {
+          scheduleScanBurst();
+        }
       }, 0);
     };
+
+    const handlePageChange = () => {
+      const nextPageKey = `${window.location.href}|${document.title}`;
+      if (nextPageKey === lastPageKey) {
+        return;
+      }
+
+      lastPageKey = nextPageKey;
+      detachPlayer();
+      scheduleScanBurst();
+      postSnapshot("navigation");
+    };
+
+    const originalPushState = history.pushState.bind(history);
+    const originalReplaceState = history.replaceState.bind(history);
+    const queuePageChangeCheck = () => {
+      window.setTimeout(handlePageChange, 0);
+    };
+
+    history.pushState = ((...args: Parameters<History["pushState"]>) => {
+      const result = originalPushState(...args);
+      queuePageChangeCheck();
+      return result;
+    }) as History["pushState"];
+
+    history.replaceState = ((...args: Parameters<History["replaceState"]>) => {
+      const result = originalReplaceState(...args);
+      queuePageChangeCheck();
+      return result;
+    }) as History["replaceState"];
+
+    const handlePopState = () => {
+      queuePageChangeCheck();
+    };
+    window.addEventListener("popstate", handlePopState);
+    window.addEventListener("pageshow", handlePopState);
+    const pageKeyPollIntervalId = window.setInterval(
+      handlePageChange,
+      PAGE_KEY_POLL_INTERVAL_MS,
+    );
+    const fallbackScanIntervalId = window.setInterval(() => {
+      if (!player) {
+        scanForPlayer();
+      }
+    }, FALLBACK_SCAN_INTERVAL_MS);
+    const heartbeatIntervalId = window.setInterval(() => {
+      postSnapshot("heartbeat");
+    }, 10_000);
 
     const observer = new MutationObserver(() => {
       scheduleScan();
@@ -184,6 +262,20 @@ export default defineContentScript({
     port.onDisconnect.addListener(() => {
       observer.disconnect();
       detachPlayer();
+      clearScanBurst();
+      if (pageKeyPollIntervalId) {
+        window.clearInterval(pageKeyPollIntervalId);
+      }
+      if (fallbackScanIntervalId) {
+        window.clearInterval(fallbackScanIntervalId);
+      }
+      if (heartbeatIntervalId) {
+        window.clearInterval(heartbeatIntervalId);
+      }
+      history.pushState = originalPushState as History["pushState"];
+      history.replaceState = originalReplaceState as History["replaceState"];
+      window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener("pageshow", handlePopState);
     });
 
     port.onMessage.addListener((message) => {
@@ -192,19 +284,9 @@ export default defineContentScript({
       }
     });
 
-    window.setInterval(() => {
-      const nextPageKey = `${window.location.href}|${document.title}`;
-      if (nextPageKey !== lastPageKey) {
-        lastPageKey = nextPageKey;
-        scheduleScan();
-        postSnapshot("navigation");
-      }
-    }, 500);
-
-    window.setInterval(scanForPlayer, 750);
-    window.setInterval(() => {
-      postSnapshot("heartbeat");
-    }, 10_000);
     scanForPlayer();
+    if (!player) {
+      scheduleScanBurst();
+    }
   },
 });

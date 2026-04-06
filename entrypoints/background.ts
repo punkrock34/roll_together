@@ -3,6 +3,7 @@ import { browser, type Browser } from "wxt/browser";
 import {
   CONTENT_PORT_NAME,
   POPUP_PORT_NAME,
+  POPUP_STATE_PORT_NAME,
   type ApplyRemotePlaybackMessage,
   type ContentOutboundMessage,
   type PopupRequestMessage,
@@ -62,17 +63,23 @@ interface TabSession {
   autoJoinSuppressedRoomId?: string;
   lastOutboundPlayback?: PlaybackSnapshot;
   lastOutboundAt?: number;
+  lastWatchProgressAt?: number;
+  reconnectAttempt: number;
 }
 
 const DEFAULT_ACTION_TITLE = "Roll Together";
 const NAVIGATION_CLEANUP_TIMEOUT_MS = 12_000;
 const DISCONNECTED_CLEANUP_TIMEOUT_MS = 3_000;
 const HOST_HEARTBEAT_INTERVAL_MS = 1_500;
+const WATCH_PROGRESS_WRITE_INTERVAL_MS = 15_000;
+const RECONNECT_DELAYS_MS = [250, 750, 1_500, 3_000];
 
 export default defineBackground({
   type: "module",
   main() {
     const sessions = new Map<number, TabSession>();
+    const popupStatePorts = new Set<Browser.runtime.Port>();
+    let popupStatePublishScheduled = false;
 
     const getOrCreateSession = (tabId: number): TabSession => {
       const existing = sessions.get(tabId);
@@ -85,6 +92,7 @@ export default defineBackground({
         ports: new Map<number, Browser.runtime.Port>(),
         participantCount: 1,
         connectionState: "ready",
+        reconnectAttempt: 0,
       };
       sessions.set(tabId, created);
       return created;
@@ -118,8 +126,130 @@ export default defineBackground({
       }
     };
 
+    const postPopupState = (
+      port: Browser.runtime.Port,
+      response: PopupStateResponse,
+    ) => {
+      try {
+        port.postMessage(response);
+      } catch (error) {
+        if (!isIgnorablePortError(error)) {
+          console.error("Failed to post popup state", error);
+        }
+      }
+    };
+
+    const buildActivePopupState = async (): Promise<PopupStateResponse> => {
+      const activeTab = (
+        await browser.tabs.query({
+          active: true,
+          currentWindow: true,
+        })
+      )[0];
+      const settings = await getSettings();
+      const recentRooms = await listRecentRooms();
+
+      if (!activeTab?.id) {
+        return {
+          supported: false,
+          providerReady: false,
+          connectionState: "unsupported",
+          participantCount: 0,
+          backendHttpUrl: settings.backendHttpUrl,
+          backendWsUrl: settings.backendWsUrl,
+          recentRooms,
+          themeMode: settings.themeMode,
+          isHost: false,
+        };
+      }
+
+      const session = sessions.get(activeTab.id);
+      const supported =
+        typeof activeTab.url === "string" && isCrunchyrollUrl(activeTab.url);
+      const shareUrl =
+        activeTab.url && session?.roomId
+          ? buildRoomInviteUrl(activeTab.url, session.roomId)
+          : undefined;
+      const currentPlayback = session?.roomPlayback ?? session?.localPlayback;
+
+      return {
+        activeTabId: activeTab.id,
+        activeTabUrl: activeTab.url,
+        supported,
+        providerReady: Boolean(session?.localPlayback),
+        connectionState: supported
+          ? (session?.connectionState ?? "ready")
+          : "unsupported",
+        roomId: session?.roomId,
+        shareUrl,
+        participantCount: session?.participantCount ?? 0,
+        episodeTitle: currentPlayback?.episodeTitle,
+        backendHttpUrl: settings.backendHttpUrl,
+        backendWsUrl: settings.backendWsUrl,
+        recentRooms,
+        watchProgress: await getWatchProgressForEpisode(
+          currentPlayback?.episodeUrl,
+        ),
+        lastError: session?.lastError,
+        hostSessionId: session?.hostSessionId,
+        sessionId: session?.sessionId,
+        isHost:
+          Boolean(session?.sessionId) &&
+          session?.hostSessionId === session?.sessionId,
+        themeMode: settings.themeMode,
+      };
+    };
+
+    const safeBuildActivePopupState = async (): Promise<PopupStateResponse> => {
+      try {
+        return await buildActivePopupState();
+      } catch (error) {
+        console.error("Failed to build popup state", error);
+      }
+
+      const settings = await getSettings();
+      const recentRooms = await listRecentRooms();
+      return {
+        supported: false,
+        providerReady: false,
+        connectionState: "unsupported",
+        participantCount: 0,
+        backendHttpUrl: settings.backendHttpUrl,
+        backendWsUrl: settings.backendWsUrl,
+        recentRooms,
+        themeMode: settings.themeMode,
+        lastError: "Unable to read extension state.",
+        isHost: false,
+      };
+    };
+
+    const publishPopupStates = async () => {
+      popupStatePublishScheduled = false;
+
+      if (popupStatePorts.size === 0) {
+        return;
+      }
+
+      const response = await safeBuildActivePopupState();
+      for (const port of popupStatePorts) {
+        postPopupState(port, response);
+      }
+    };
+
+    const queuePopupStatePublish = () => {
+      if (popupStatePorts.size === 0 || popupStatePublishScheduled) {
+        return;
+      }
+
+      popupStatePublishScheduled = true;
+      queueMicrotask(() => {
+        void publishPopupStates();
+      });
+    };
+
     const publishRoomState = (session: TabSession) => {
       updateActionState(session);
+      queuePopupStatePublish();
     };
 
     const updateActionState = (session: TabSession) => {
@@ -220,12 +350,17 @@ export default defineBackground({
 
     const scheduleReconnect = (session: TabSession, roomId: string) => {
       stopReconnect(session);
+      const delayMs =
+        RECONNECT_DELAYS_MS[
+          Math.min(session.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)
+        ];
+      session.reconnectAttempt += 1;
       session.reconnectTimeout = setTimeout(() => {
         if (!getActivePort(session) || !session.localPlayback) {
           return;
         }
         void connectSession(session, roomId);
-      }, 1_500);
+      }, delayMs);
     };
 
     const connectSession = async (
@@ -259,6 +394,8 @@ export default defineBackground({
           return;
         }
 
+        session.reconnectAttempt = 0;
+
         const joinMessage: JoinMessage = {
           type: "join",
           version: PROTOCOL_VERSION,
@@ -284,7 +421,7 @@ export default defineBackground({
         }, 20_000);
       });
 
-      socket.addEventListener("message", async (event) => {
+      socket.addEventListener("message", (event) => {
         if (session.socket !== socket || typeof event.data !== "string") {
           return;
         }
@@ -294,7 +431,7 @@ export default defineBackground({
           return;
         }
 
-        await handleServerMessage(session, message);
+        handleServerMessage(session, message);
       });
 
       socket.addEventListener("error", () => {
@@ -459,7 +596,7 @@ export default defineBackground({
       }
     };
 
-    const handleServerMessage = async (
+    const handleServerMessage = (
       session: TabSession,
       message: ServerMessage,
     ) => {
@@ -479,13 +616,19 @@ export default defineBackground({
               : undefined;
 
           if (shareUrl) {
-            await upsertRecentRoom({
+            void upsertRecentRoom({
               roomId: session.roomId,
               shareUrl,
               episodeTitle: message.playback.episodeTitle,
               episodeUrl: message.playback.episodeUrl,
               updatedAt: Date.now(),
-            });
+            })
+              .then(() => {
+                queuePopupStatePublish();
+              })
+              .catch((error) => {
+                console.error("Failed to save recent room", error);
+              });
           }
 
           if (
@@ -530,7 +673,7 @@ export default defineBackground({
           session.roomPlayback = message.playback;
           session.lastError = undefined;
 
-          await upsertRecentRoom({
+          void upsertRecentRoom({
             roomId: message.roomId,
             shareUrl: buildRoomInviteUrl(
               message.playback.episodeUrl,
@@ -539,7 +682,13 @@ export default defineBackground({
             episodeTitle: message.playback.episodeTitle,
             episodeUrl: message.playback.episodeUrl,
             updatedAt: Date.now(),
-          });
+          })
+            .then(() => {
+              queuePopupStatePublish();
+            })
+            .catch((error) => {
+              console.error("Failed to save navigated room", error);
+            });
 
           if (
             session.localPlayback?.episodeUrl === message.playback.episodeUrl
@@ -620,36 +769,70 @@ export default defineBackground({
       void connectSession(session, session.roomIdFromUrl);
     };
 
-    const getLiveTabContext = async (
+    const resolveTabContext = (
       session: TabSession,
       message: ContentOutboundMessage,
       port: Browser.runtime.Port,
     ) => {
-      const liveTab = await browser.tabs
-        .get(session.tabId)
-        .catch(() => undefined);
-
       return {
-        tabUrl:
-          liveTab?.url ??
-          port.sender?.tab?.url ??
-          session.tabUrl ??
-          message.tabUrl,
+        tabUrl: session.tabUrl ?? port.sender?.tab?.url ?? message.tabUrl,
         tabTitle:
-          liveTab?.title ??
-          port.sender?.tab?.title ??
           session.tabTitle ??
+          port.sender?.tab?.title ??
           message.episode.episodeTitle,
       };
     };
 
-    const handleContentSnapshot = async (
+    const shouldPersistWatchProgress = (
+      session: TabSession,
+      previousPlayback: PlaybackSnapshot | undefined,
+      nextPlayback: PlaybackSnapshot,
+      reason: ContentOutboundMessage["reason"],
+    ) => {
+      if (reason !== "heartbeat") {
+        return true;
+      }
+
+      if (nextPlayback.state !== "playing") {
+        return true;
+      }
+
+      if (previousPlayback?.episodeUrl !== nextPlayback.episodeUrl) {
+        return true;
+      }
+
+      return (
+        !session.lastWatchProgressAt ||
+        Date.now() - session.lastWatchProgressAt >=
+          WATCH_PROGRESS_WRITE_INTERVAL_MS
+      );
+    };
+
+    const queueWatchProgressUpdate = (
+      session: TabSession,
+      playback: PlaybackSnapshot,
+      previousPlayback: PlaybackSnapshot | undefined,
+      reason: ContentOutboundMessage["reason"],
+    ) => {
+      if (
+        !shouldPersistWatchProgress(session, previousPlayback, playback, reason)
+      ) {
+        return;
+      }
+
+      session.lastWatchProgressAt = Date.now();
+      void upsertWatchProgress(playback).catch((error) => {
+        console.error("Failed to persist watch progress", error);
+      });
+    };
+
+    const handleContentSnapshot = (
       session: TabSession,
       message: ContentOutboundMessage,
       port: Browser.runtime.Port,
     ) => {
       const previousPlayback = session.localPlayback;
-      const liveTab = await getLiveTabContext(session, message, port);
+      const liveTab = resolveTabContext(session, message, port);
       const normalizedPlayback = normalizePlaybackSnapshotForTab(
         message.playback,
         liveTab.tabUrl,
@@ -672,7 +855,12 @@ export default defineBackground({
         session.autoJoinSuppressedRoomId = undefined;
       }
 
-      await upsertWatchProgress(normalizedPlayback);
+      queueWatchProgressUpdate(
+        session,
+        normalizedPlayback,
+        previousPlayback,
+        message.reason,
+      );
 
       if (
         session.connectionState === "switching" &&
@@ -709,75 +897,15 @@ export default defineBackground({
       message: PopupRequestMessage,
     ): Promise<PopupStateResponse | undefined> => {
       switch (message.type) {
-        case "popup:get-active-tab-state": {
-          const activeTab = (
-            await browser.tabs.query({
-              active: true,
-              currentWindow: true,
-            })
-          )[0];
-          const settings = await getSettings();
-          const recentRooms = await listRecentRooms();
-
-          if (!activeTab?.id) {
-            return {
-              supported: false,
-              providerReady: false,
-              connectionState: "unsupported",
-              participantCount: 0,
-              backendHttpUrl: settings.backendHttpUrl,
-              backendWsUrl: settings.backendWsUrl,
-              recentRooms,
-              themeMode: settings.themeMode,
-              isHost: false,
-            };
-          }
-
-          const session = sessions.get(activeTab.id);
-          const supported =
-            typeof activeTab.url === "string" &&
-            isCrunchyrollUrl(activeTab.url);
-          const shareUrl =
-            activeTab.url && session?.roomId
-              ? buildRoomInviteUrl(activeTab.url, session.roomId)
-              : undefined;
-          const currentPlayback =
-            session?.roomPlayback ?? session?.localPlayback;
-
-          return {
-            activeTabId: activeTab.id,
-            activeTabUrl: activeTab.url,
-            supported,
-            providerReady: Boolean(session?.localPlayback),
-            connectionState: supported
-              ? (session?.connectionState ?? "ready")
-              : "unsupported",
-            roomId: session?.roomId,
-            shareUrl,
-            participantCount: session?.participantCount ?? 0,
-            episodeTitle: currentPlayback?.episodeTitle,
-            backendHttpUrl: settings.backendHttpUrl,
-            backendWsUrl: settings.backendWsUrl,
-            recentRooms,
-            watchProgress: await getWatchProgressForEpisode(
-              currentPlayback?.episodeUrl,
-            ),
-            lastError: session?.lastError,
-            hostSessionId: session?.hostSessionId,
-            sessionId: session?.sessionId,
-            isHost:
-              Boolean(session?.sessionId) &&
-              session?.hostSessionId === session?.sessionId,
-            themeMode: settings.themeMode,
-          };
-        }
+        case "popup:get-active-tab-state":
+          return buildActivePopupState();
         case "popup:create-room": {
           const session = sessions.get(message.tabId);
           if (session?.localPlayback) {
             session.autoJoinSuppressedRoomId = undefined;
             await connectSession(session, session.roomId);
           }
-          return handlePopupMessage({ type: "popup:get-active-tab-state" });
+          return buildActivePopupState();
         }
         case "popup:disconnect-room": {
           const session = sessions.get(message.tabId);
@@ -794,7 +922,7 @@ export default defineBackground({
             session.lastError = undefined;
             publishRoomState(session);
           }
-          return handlePopupMessage({ type: "popup:get-active-tab-state" });
+          return buildActivePopupState();
         }
       }
     };
@@ -811,20 +939,7 @@ export default defineBackground({
         console.error("Failed to handle popup message", error);
       }
 
-      const settings = await getSettings();
-      const recentRooms = await listRecentRooms();
-      return {
-        supported: false,
-        providerReady: false,
-        connectionState: "unsupported",
-        participantCount: 0,
-        backendHttpUrl: settings.backendHttpUrl,
-        backendWsUrl: settings.backendWsUrl,
-        recentRooms,
-        themeMode: settings.themeMode,
-        lastError: "Unable to read extension state.",
-        isHost: false,
-      };
+      return safeBuildActivePopupState();
     };
 
     browser.runtime.onInstalled.addListener(() => {
@@ -865,6 +980,8 @@ export default defineBackground({
 
         void connectSession(session, session.roomId);
       }
+
+      queuePopupStatePublish();
     });
 
     browser.runtime.onMessage.addListener((message: PopupRequestMessage) => {
@@ -872,6 +989,17 @@ export default defineBackground({
     });
 
     browser.runtime.onConnect.addListener((port) => {
+      if (port.name === POPUP_STATE_PORT_NAME) {
+        popupStatePorts.add(port);
+        void safeBuildActivePopupState().then((response) => {
+          postPopupState(port, response);
+        });
+        port.onDisconnect.addListener(() => {
+          popupStatePorts.delete(port);
+        });
+        return;
+      }
+
       if (port.name === POPUP_PORT_NAME) {
         port.onMessage.addListener((message: PopupRequestMessage) => {
           void safeHandlePopupMessage(message).then((response) => {
@@ -972,11 +1100,18 @@ export default defineBackground({
       if (typeof tab.title === "string" && tab.title.trim().length > 0) {
         session.tabTitle = tab.title;
       }
+
+      queuePopupStatePublish();
+    });
+
+    browser.tabs.onActivated.addListener(() => {
+      queuePopupStatePublish();
     });
 
     browser.tabs.onRemoved.addListener((tabId) => {
       const session = sessions.get(tabId);
       if (!session) {
+        queuePopupStatePublish();
         return;
       }
 
@@ -988,6 +1123,7 @@ export default defineBackground({
       });
       sessions.delete(tabId);
       clearActionState(tabId);
+      queuePopupStatePublish();
     });
   },
 });
