@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildSyncDecision } from "./reconcile";
+import { buildSyncDecision, needsPlaybackCorrection } from "./reconcile";
 import type { PlaybackSnapshot } from "./protocol";
 
 const basePlayback: PlaybackSnapshot = {
@@ -42,5 +42,23 @@ describe("buildSyncDecision", () => {
     });
 
     expect(decision.shouldSeek).toBe(false);
+  });
+
+  it("waits until drift is meaningfully large before seeking", () => {
+    const decision = buildSyncDecision(basePlayback, {
+      ...basePlayback,
+      currentTime: 14.8,
+    });
+
+    expect(decision.shouldSeek).toBe(false);
+  });
+
+  it("skips corrections when playback is already close enough", () => {
+    expect(
+      needsPlaybackCorrection(basePlayback, {
+        ...basePlayback,
+        currentTime: 13.5,
+      }),
+    ).toBe(false);
   });
 });

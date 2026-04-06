@@ -21,6 +21,7 @@ export interface PlaybackSnapshot extends EpisodeInfo {
 
 export interface ParticipantPresence {
   sessionId: string;
+  displayName?: string;
   isHost: boolean;
   joinedAt: number;
   lastSeenAt: number;
@@ -32,6 +33,7 @@ export interface JoinMessage {
   version: number;
   roomId?: string;
   sessionId?: string;
+  displayName?: string;
   playback: PlaybackSnapshot;
 }
 

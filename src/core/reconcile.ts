@@ -1,6 +1,6 @@
 import type { PlaybackSnapshot } from "./protocol";
 
-export const SYNC_DRIFT_THRESHOLD_SECONDS = 0.75;
+export const SYNC_DRIFT_THRESHOLD_SECONDS = 3;
 
 export interface SyncDecision {
   shouldPlay: boolean;
@@ -42,4 +42,16 @@ export function arePlaybackSnapshotsSimilar(
     left.duration === right.duration &&
     Math.abs(left.currentTime - right.currentTime) <= driftThresholdSeconds
   );
+}
+
+export function needsPlaybackCorrection(
+  local: PlaybackSnapshot | undefined,
+  remote: PlaybackSnapshot | undefined,
+) {
+  if (!local || !remote) {
+    return true;
+  }
+
+  const decision = buildSyncDecision(local, remote);
+  return decision.shouldPlay || decision.shouldPause || decision.shouldSeek;
 }

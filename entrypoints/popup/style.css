@@ -286,6 +286,28 @@ button:disabled {
   gap: 10px;
 }
 
+.participants-panel,
+.participant-list {
+  display: grid;
+  gap: 10px;
+}
+
+.participant-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--rt-border);
+  background: var(--rt-panel-strong);
+}
+
+.participant-host {
+  background: rgba(255, 122, 26, 0.14);
+  color: var(--rt-accent-strong);
+}
+
 .link-button {
   padding: 0;
   background: transparent;

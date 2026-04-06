@@ -14,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   type JoinMessage,
   type NavigateMessage,
+  type ParticipantPresence,
   parseServerMessage,
   type PingMessage,
   type PlaybackSnapshot,
@@ -32,6 +33,7 @@ import {
 import {
   arePlaybackSnapshotsSimilar,
   buildSyncDecision,
+  needsPlaybackCorrection,
 } from "../src/core/reconcile";
 import { buildRoomInviteUrl, getRoomIdFromUrl } from "../src/core/url";
 import { isCrunchyrollUrl } from "../src/providers/crunchyroll/player";
@@ -54,6 +56,7 @@ interface TabSession {
   sessionId?: string;
   hostSessionId?: string;
   participantCount: number;
+  participants: ParticipantPresence[];
   connectionState: RoomConnectionStatus;
   lastError?: string;
   socket?: WebSocket;
@@ -70,7 +73,7 @@ interface TabSession {
 const DEFAULT_ACTION_TITLE = "Roll Together";
 const NAVIGATION_CLEANUP_TIMEOUT_MS = 12_000;
 const DISCONNECTED_CLEANUP_TIMEOUT_MS = 3_000;
-const HOST_HEARTBEAT_INTERVAL_MS = 1_500;
+const HOST_HEARTBEAT_INTERVAL_MS = 4_000;
 const WATCH_PROGRESS_WRITE_INTERVAL_MS = 15_000;
 const RECONNECT_DELAYS_MS = [250, 750, 1_500, 3_000];
 
@@ -91,6 +94,7 @@ export default defineBackground({
         tabId,
         ports: new Map<number, Browser.runtime.Port>(),
         participantCount: 1,
+        participants: [],
         connectionState: "ready",
         reconnectAttempt: 0,
       };
@@ -155,8 +159,10 @@ export default defineBackground({
           providerReady: false,
           connectionState: "unsupported",
           participantCount: 0,
+          participants: [],
           backendHttpUrl: settings.backendHttpUrl,
           backendWsUrl: settings.backendWsUrl,
+          displayName: settings.displayName,
           recentRooms,
           themeMode: settings.themeMode,
           isHost: false,
@@ -183,9 +189,11 @@ export default defineBackground({
         roomId: session?.roomId,
         shareUrl,
         participantCount: session?.participantCount ?? 0,
+        participants: session?.participants ?? [],
         episodeTitle: currentPlayback?.episodeTitle,
         backendHttpUrl: settings.backendHttpUrl,
         backendWsUrl: settings.backendWsUrl,
+        displayName: settings.displayName,
         recentRooms,
         watchProgress: await getWatchProgressForEpisode(
           currentPlayback?.episodeUrl,
@@ -214,8 +222,10 @@ export default defineBackground({
         providerReady: false,
         connectionState: "unsupported",
         participantCount: 0,
+        participants: [],
         backendHttpUrl: settings.backendHttpUrl,
         backendWsUrl: settings.backendWsUrl,
+        displayName: settings.displayName,
         recentRooms,
         themeMode: settings.themeMode,
         lastError: "Unable to read extension state.",
@@ -341,6 +351,7 @@ export default defineBackground({
         session.hostSessionId = undefined;
         session.roomPlayback = undefined;
         session.participantCount = 1;
+        session.participants = [];
       }
 
       if (options.clearIdentity) {
@@ -401,6 +412,7 @@ export default defineBackground({
           version: PROTOCOL_VERSION,
           roomId: requestedRoomId,
           sessionId: session.sessionId,
+          displayName: settings.displayName,
           playback: session.localPlayback,
         };
 
@@ -517,6 +529,26 @@ export default defineBackground({
       session.lastOutboundAt = Date.now();
     };
 
+    const applyRoomPlaybackIfNeeded = (
+      session: TabSession,
+      playback: PlaybackSnapshot,
+      roomId: string,
+      participantCount: number,
+      hostSessionId: string,
+    ) => {
+      if (!needsPlaybackCorrection(session.localPlayback, playback)) {
+        return;
+      }
+
+      postToContent(session, {
+        type: "background:apply-remote",
+        roomId,
+        participantCount,
+        hostSessionId,
+        playback,
+      });
+    };
+
     const shouldSendHostUpdate = (
       session: TabSession,
       previousPlayback: PlaybackSnapshot | undefined,
@@ -548,7 +580,7 @@ export default defineBackground({
           !arePlaybackSnapshotsSimilar(
             session.lastOutboundPlayback,
             nextPlayback,
-            0.15,
+            1,
           )
         ) {
           return "sync";
@@ -561,7 +593,7 @@ export default defineBackground({
         !arePlaybackSnapshotsSimilar(
           session.lastOutboundPlayback,
           nextPlayback,
-          0.05,
+          0.15,
         )
       ) {
         return "sync";
@@ -607,6 +639,7 @@ export default defineBackground({
           session.sessionId = message.sessionId;
           session.hostSessionId = message.hostSessionId;
           session.participantCount = message.participantCount;
+          session.participants = message.participants;
           session.lastError = undefined;
           session.roomPlayback = message.playback;
 
@@ -631,22 +664,13 @@ export default defineBackground({
               });
           }
 
-          if (
-            session.localPlayback &&
-            !arePlaybackSnapshotsSimilar(
-              session.localPlayback,
-              message.playback,
-              0.2,
-            )
-          ) {
-            postToContent(session, {
-              type: "background:apply-remote",
-              roomId: message.roomId,
-              participantCount: message.participantCount,
-              hostSessionId: message.hostSessionId,
-              playback: message.playback,
-            });
-          }
+          applyRoomPlaybackIfNeeded(
+            session,
+            message.playback,
+            message.roomId,
+            message.participantCount,
+            message.hostSessionId,
+          );
 
           publishRoomState(session);
           break;
@@ -654,21 +678,23 @@ export default defineBackground({
         case "sync":
           session.connectionState = "connected";
           session.participantCount = message.participantCount;
+          session.participants = message.participants;
           session.hostSessionId = message.hostSessionId;
           session.roomPlayback = message.playback;
           session.lastError = undefined;
-          postToContent(session, {
-            type: "background:apply-remote",
-            roomId: message.roomId,
-            participantCount: message.participantCount,
-            hostSessionId: message.hostSessionId,
-            playback: message.playback,
-          });
+          applyRoomPlaybackIfNeeded(
+            session,
+            message.playback,
+            message.roomId,
+            message.participantCount,
+            message.hostSessionId,
+          );
           publishRoomState(session);
           break;
         case "navigate":
           session.roomId = message.roomId;
           session.participantCount = message.participantCount;
+          session.participants = message.participants;
           session.hostSessionId = message.hostSessionId;
           session.roomPlayback = message.playback;
           session.lastError = undefined;
@@ -694,13 +720,13 @@ export default defineBackground({
             session.localPlayback?.episodeUrl === message.playback.episodeUrl
           ) {
             session.connectionState = "connected";
-            postToContent(session, {
-              type: "background:apply-remote",
-              roomId: message.roomId,
-              participantCount: message.participantCount,
-              hostSessionId: message.hostSessionId,
-              playback: message.playback,
-            });
+            applyRoomPlaybackIfNeeded(
+              session,
+              message.playback,
+              message.roomId,
+              message.participantCount,
+              message.hostSessionId,
+            );
           } else {
             navigateTabToPlayback(session, message.playback, message.roomId);
           }
@@ -708,6 +734,7 @@ export default defineBackground({
           break;
         case "presence":
           session.participantCount = message.participantCount;
+          session.participants = message.participants;
           session.hostSessionId = message.hostSessionId;
           if (session.roomId) {
             session.connectionState =
@@ -952,33 +979,36 @@ export default defineBackground({
     });
 
     browser.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== "local" || !changes.settings) {
+      if (areaName !== "local") {
         return;
       }
 
-      const previousSettings = changes.settings.oldValue as
-        | ExtensionSettings
-        | undefined;
-      const nextSettings = changes.settings.newValue as
-        | ExtensionSettings
-        | undefined;
-      const backendChanged =
-        previousSettings?.backendWsUrl !== nextSettings?.backendWsUrl ||
-        previousSettings?.backendHttpUrl !== nextSettings?.backendHttpUrl;
-      if (!backendChanged) {
-        return;
-      }
+      if (changes.settings) {
+        const previousSettings = changes.settings.oldValue as
+          | ExtensionSettings
+          | undefined;
+        const nextSettings = changes.settings.newValue as
+          | ExtensionSettings
+          | undefined;
+        const backendChanged =
+          previousSettings?.backendWsUrl !== nextSettings?.backendWsUrl ||
+          previousSettings?.backendHttpUrl !== nextSettings?.backendHttpUrl;
+        const displayNameChanged =
+          previousSettings?.displayName !== nextSettings?.displayName;
 
-      for (const session of sessions.values()) {
-        if (
-          !session.roomId ||
-          !session.localPlayback ||
-          !getActivePort(session)
-        ) {
-          continue;
+        if (backendChanged || displayNameChanged) {
+          for (const session of sessions.values()) {
+            if (
+              !session.roomId ||
+              !session.localPlayback ||
+              !getActivePort(session)
+            ) {
+              continue;
+            }
+
+            void connectSession(session, session.roomId);
+          }
         }
-
-        void connectSession(session, session.roomId);
       }
 
       queuePopupStatePublish();

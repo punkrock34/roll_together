@@ -10,6 +10,7 @@ export interface ExtensionSettings {
   backendHttpUrl: string;
   backendWsUrl: string;
   themeMode: ThemeMode;
+  displayName: string;
 }
 
 export interface RecentRoomEntry {
@@ -43,6 +44,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   backendWsUrl:
     import.meta.env.WXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:3000/ws",
   themeMode: "system",
+  displayName: "Guest",
 };
 
 const DEFAULT_STATE: ExtensionLocalState = {
@@ -76,6 +78,11 @@ function normalizeSettings(settings: unknown): ExtensionSettings {
   }
 
   const candidate = settings as Partial<ExtensionSettings>;
+  const displayName =
+    typeof candidate.displayName === "string"
+      ? candidate.displayName.trim()
+      : "";
+
   return {
     backendHttpUrl:
       typeof candidate.backendHttpUrl === "string" &&
@@ -93,6 +100,10 @@ function normalizeSettings(settings: unknown): ExtensionSettings {
       candidate.themeMode === "system"
         ? candidate.themeMode
         : DEFAULT_SETTINGS.themeMode,
+    displayName:
+      displayName.length > 0
+        ? displayName.slice(0, 40)
+        : DEFAULT_SETTINGS.displayName,
   };
 }
 

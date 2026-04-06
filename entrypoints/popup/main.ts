@@ -20,6 +20,7 @@ import type {
   PopupRequestMessage,
   PopupStateResponse,
 } from "../../src/core/messages";
+import type { ParticipantPresence } from "../../src/core/protocol";
 import { isCrunchyrollUrl } from "../../src/providers/crunchyroll/player";
 import { applyThemeMode } from "../../src/ui/theme";
 
@@ -169,6 +170,18 @@ function roomRoleLabel(state: PopupStateResponse) {
   }
 
   return state.isHost ? "You control this room" : "Following the current host";
+}
+
+function participantDisplayName(
+  participant: ParticipantPresence,
+  currentSessionId: string | undefined,
+) {
+  const baseName = participant.displayName?.trim() || "Guest";
+  if (participant.sessionId === currentSessionId) {
+    return `${baseName} (You)`;
+  }
+
+  return baseName;
 }
 
 function describeHomeState(state: PopupStateResponse) {
@@ -329,6 +342,37 @@ function connectPopupStatePort() {
   return port;
 }
 
+browser.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") {
+    return;
+  }
+
+  if (changes.settings?.newValue && livePopupState) {
+    const nextSettings = changes.settings.newValue as ExtensionSettings;
+    livePopupState = {
+      ...livePopupState,
+      backendHttpUrl: nextSettings.backendHttpUrl,
+      backendWsUrl: nextSettings.backendWsUrl,
+      displayName: nextSettings.displayName,
+      themeMode: nextSettings.themeMode,
+    };
+    applyThemeMode(nextSettings.themeMode);
+  }
+
+  if (changes.recentRooms?.newValue && livePopupState) {
+    livePopupState = {
+      ...livePopupState,
+      recentRooms: Array.isArray(changes.recentRooms.newValue)
+        ? (changes.recentRooms.newValue as RecentRoomEntry[])
+        : livePopupState.recentRooms,
+    };
+  }
+
+  if (changes.settings || changes.recentRooms) {
+    queueRender();
+  }
+});
+
 async function waitForLivePopupState(timeoutMs = 500) {
   connectPopupStatePort();
 
@@ -372,8 +416,10 @@ async function createFallbackState(
     providerReady: false,
     connectionState: supported ? "ready" : "unsupported",
     participantCount: 0,
+    participants: [],
     backendHttpUrl: settings.backendHttpUrl,
     backendWsUrl: settings.backendWsUrl,
+    displayName: settings.displayName,
     recentRooms,
     themeMode: settings.themeMode,
     lastError,
@@ -411,16 +457,21 @@ async function loadViewModel(): Promise<PopupViewModel> {
     await waitForLivePopupState(),
     fallbackState,
   );
-  applyThemeMode(normalizedState.themeMode);
+  const syncedState: PopupStateResponse = {
+    ...normalizedState,
+    backendHttpUrl: settings.backendHttpUrl,
+    backendWsUrl: settings.backendWsUrl,
+    displayName: settings.displayName,
+    recentRooms,
+    themeMode: settings.themeMode,
+    participants: normalizedState.participants ?? [],
+  };
+  applyThemeMode(syncedState.themeMode);
 
   return {
-    popupState: normalizedState,
-    settings: {
-      backendHttpUrl: normalizedState.backendHttpUrl,
-      backendWsUrl: normalizedState.backendWsUrl,
-      themeMode: normalizedState.themeMode,
-    },
-    recentRooms: normalizedState.recentRooms,
+    popupState: syncedState,
+    settings,
+    recentRooms,
   };
 }
 
@@ -480,6 +531,50 @@ function createMetaCard(label: string, value: string) {
   return card;
 }
 
+function createParticipantsPanel(view: PopupViewModel) {
+  const { popupState } = view;
+  if (!popupState.roomId || popupState.participants.length === 0) {
+    return undefined;
+  }
+
+  const section = createElement("div", { className: "participants-panel" });
+  const head = createElement("div", { className: "section-head compact" });
+  appendChildren(head, [
+    createElement("h3", { text: "Participants" }),
+    createElement("span", {
+      className: "muted",
+      text: `${popupState.participants.length}`,
+    }),
+  ]);
+
+  const list = createElement("div", { className: "participant-list" });
+  for (const participant of popupState.participants) {
+    const item = createElement("div", { className: "participant-item" });
+    const copy = createElement("div");
+    appendChildren(copy, [
+      createElement("strong", {
+        text: participantDisplayName(participant, popupState.sessionId),
+      }),
+      createElement("p", {
+        className: "muted",
+        text: participant.isHost ? "Host" : "Viewer",
+      }),
+    ]);
+
+    const badge = createElement("span", {
+      className:
+        `room-pill ${participant.isHost ? "participant-host" : ""}`.trim(),
+      text: participant.isHost ? "Host" : "In room",
+    });
+
+    appendChildren(item, [copy, badge]);
+    list.appendChild(item);
+  }
+
+  appendChildren(section, [head, list]);
+  return section;
+}
+
 function createHomePanel(view: PopupViewModel) {
   const { popupState } = view;
   const summary = describeHomeState(popupState);
@@ -531,6 +626,7 @@ function createHomePanel(view: PopupViewModel) {
     createElement("h1", { text: summary.title }),
     createElement("p", { className: "muted", text: summary.body }),
     metaGrid,
+    createParticipantsPanel(view),
   ]);
 
   if (popupState.shareUrl) {
@@ -714,6 +810,12 @@ function createSettingsPanel(view: PopupViewModel) {
   }) as HTMLInputElement;
   httpInput.value = settings.backendHttpUrl;
 
+  const displayNameInput = createElement("input", {
+    id: "settings-display-name",
+    type: "text",
+  }) as HTMLInputElement;
+  displayNameInput.value = settings.displayName;
+
   const wsInput = createElement("input", {
     id: "settings-ws-url",
     type: "text",
@@ -740,6 +842,7 @@ function createSettingsPanel(view: PopupViewModel) {
 
   appendChildren(panel, [
     head,
+    createField("Display Name", displayNameInput),
     createField("HTTP Base URL", httpInput),
     createField("WebSocket URL", wsInput),
     createField("Theme", select),
@@ -872,6 +975,10 @@ function bindEvents(view: PopupViewModel) {
     .querySelector<HTMLButtonElement>("[data-action='save-settings']")
     ?.addEventListener("click", async () => {
       const nextSettings: ExtensionSettings = {
+        displayName:
+          app
+            .querySelector<HTMLInputElement>("#settings-display-name")
+            ?.value.trim() ?? DEFAULT_SETTINGS.displayName,
         backendHttpUrl:
           app
             .querySelector<HTMLInputElement>("#settings-http-url")
@@ -886,6 +993,15 @@ function bindEvents(view: PopupViewModel) {
       };
 
       await saveSettings(nextSettings);
+      livePopupState = livePopupState
+        ? {
+            ...livePopupState,
+            backendHttpUrl: nextSettings.backendHttpUrl,
+            backendWsUrl: nextSettings.backendWsUrl,
+            displayName: nextSettings.displayName,
+            themeMode: nextSettings.themeMode,
+          }
+        : livePopupState;
       uiState.notice = "Settings saved.";
       applyThemeMode(nextSettings.themeMode);
       await render();
@@ -895,9 +1011,26 @@ function bindEvents(view: PopupViewModel) {
     .querySelector<HTMLButtonElement>("[data-action='reset-settings']")
     ?.addEventListener("click", async () => {
       await saveSettings(DEFAULT_SETTINGS);
+      livePopupState = livePopupState
+        ? {
+            ...livePopupState,
+            backendHttpUrl: DEFAULT_SETTINGS.backendHttpUrl,
+            backendWsUrl: DEFAULT_SETTINGS.backendWsUrl,
+            displayName: DEFAULT_SETTINGS.displayName,
+            themeMode: DEFAULT_SETTINGS.themeMode,
+          }
+        : livePopupState;
       uiState.notice = "Defaults restored.";
       applyThemeMode(DEFAULT_SETTINGS.themeMode);
       await render();
+    });
+
+  app
+    .querySelector<HTMLSelectElement>("#settings-theme-mode")
+    ?.addEventListener("change", (event) => {
+      const nextTheme = (event.currentTarget as HTMLSelectElement)
+        .value as ThemeMode;
+      applyThemeMode(nextTheme);
     });
 
   app

@@ -22,15 +22,17 @@ export default defineContentScript({
     const FAST_SCAN_DELAYS_MS = [0, 50, 125, 250, 500, 900, 1_400];
     const FALLBACK_SCAN_INTERVAL_MS = 2_000;
     const PAGE_KEY_POLL_INTERVAL_MS = 1_000;
+    const KEEPALIVE_HEARTBEAT_INTERVAL_MS = 15_000;
+    const TIME_JUMP_THRESHOLD_SECONDS = 3;
     const port = browser.runtime.connect({ name: CONTENT_PORT_NAME });
 
     let player: HTMLVideoElement | null = null;
     let disposePlayerListeners: (() => void) | undefined;
     let ignoreLocalEventsUntil = 0;
-    let lastBroadcastAt = 0;
     let scanQueued = false;
     let scanBurstTimeoutIds: number[] = [];
     let lastPageKey = `${window.location.href}|${document.title}`;
+    let lastObservedCurrentTime: number | undefined;
 
     const buildSnapshot = (): PlaybackSnapshot | null => {
       if (!player) {
@@ -65,7 +67,6 @@ export default defineContentScript({
       };
 
       port.postMessage(message);
-      lastBroadcastAt = Date.now();
     };
 
     const handleLocalChange = () => {
@@ -102,6 +103,7 @@ export default defineContentScript({
       disposePlayerListeners?.();
       disposePlayerListeners = undefined;
       player = null;
+      lastObservedCurrentTime = undefined;
     };
 
     const attachPlayer = (candidate: HTMLVideoElement) => {
@@ -130,9 +132,16 @@ export default defineContentScript({
       }
 
       const handleTimeUpdate = () => {
-        if (Date.now() - lastBroadcastAt >= 1_250) {
-          postSnapshot("heartbeat");
+        const currentTime = candidate.currentTime;
+        if (
+          lastObservedCurrentTime !== undefined &&
+          Math.abs(currentTime - lastObservedCurrentTime) >
+            TIME_JUMP_THRESHOLD_SECONDS
+        ) {
+          postSnapshot("interaction");
         }
+
+        lastObservedCurrentTime = currentTime;
       };
       candidate.addEventListener("timeupdate", handleTimeUpdate);
       cleanups.push(() => {
@@ -246,7 +255,7 @@ export default defineContentScript({
     }, FALLBACK_SCAN_INTERVAL_MS);
     const heartbeatIntervalId = window.setInterval(() => {
       postSnapshot("heartbeat");
-    }, 10_000);
+    }, KEEPALIVE_HEARTBEAT_INTERVAL_MS);
 
     const observer = new MutationObserver(() => {
       scheduleScan();

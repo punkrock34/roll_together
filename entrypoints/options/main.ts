@@ -207,6 +207,7 @@ async function render(
       "Connection",
       "Point the extension at any backend you want to use.",
     ),
+    createLabelledInput("Display Name", "displayName", settings.displayName),
     createLabelledInput("HTTP Base URL", "httpUrl", settings.backendHttpUrl),
     createLabelledInput("WebSocket URL", "wsUrl", settings.backendWsUrl),
     createThemeSelect(settings.themeMode),
@@ -281,6 +282,9 @@ function bindEvents() {
     ?.querySelector<HTMLButtonElement>("#saveSettings")
     ?.addEventListener("click", async () => {
       const nextSettings: ExtensionSettings = {
+        displayName:
+          app?.querySelector<HTMLInputElement>("#displayName")?.value.trim() ??
+          DEFAULT_SETTINGS.displayName,
         backendHttpUrl:
           app?.querySelector<HTMLInputElement>("#httpUrl")?.value.trim() ??
           DEFAULT_SETTINGS.backendHttpUrl,

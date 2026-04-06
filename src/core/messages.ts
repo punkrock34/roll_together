@@ -1,4 +1,8 @@
-import type { EpisodeInfo, PlaybackSnapshot } from "./protocol";
+import type {
+  EpisodeInfo,
+  ParticipantPresence,
+  PlaybackSnapshot,
+} from "./protocol";
 import type { RecentRoomEntry, ThemeMode, WatchProgressEntry } from "./storage";
 
 export const CONTENT_PORT_NAME = "roll-together-content";
@@ -68,9 +72,11 @@ export interface PopupStateResponse {
   roomId?: string;
   shareUrl?: string;
   participantCount: number;
+  participants: ParticipantPresence[];
   episodeTitle?: string;
   backendHttpUrl: string;
   backendWsUrl: string;
+  displayName: string;
   recentRooms: RecentRoomEntry[];
   watchProgress?: WatchProgressEntry;
   lastError?: string;
