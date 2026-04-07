@@ -12,11 +12,11 @@ export interface SyncDecision {
 export function buildSyncDecision(
   local: PlaybackSnapshot,
   remote: PlaybackSnapshot,
+  driftThresholdSeconds = SYNC_DRIFT_THRESHOLD_SECONDS,
 ): SyncDecision {
   const shouldSeek =
     local.episodeUrl !== remote.episodeUrl ||
-    Math.abs(remote.currentTime - local.currentTime) >
-      SYNC_DRIFT_THRESHOLD_SECONDS;
+    Math.abs(remote.currentTime - local.currentTime) > driftThresholdSeconds;
 
   return {
     shouldPlay: local.state !== remote.state && remote.state === "playing",
@@ -58,11 +58,12 @@ export function shouldAcceptRoomPlaybackUpdate(
 export function needsPlaybackCorrection(
   local: PlaybackSnapshot | undefined,
   remote: PlaybackSnapshot | undefined,
+  driftThresholdSeconds = SYNC_DRIFT_THRESHOLD_SECONDS,
 ) {
   if (!local || !remote) {
     return true;
   }
 
-  const decision = buildSyncDecision(local, remote);
+  const decision = buildSyncDecision(local, remote, driftThresholdSeconds);
   return decision.shouldPlay || decision.shouldPause || decision.shouldSeek;
 }

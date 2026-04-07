@@ -62,13 +62,15 @@ export function consumeRemoteEchoExpectation(
   const matchedPlay =
     expectation.shouldPlay &&
     playback.state === "playing" &&
-    Math.abs(playback.currentTime - expectation.playback.currentTime) <=
-      REMOTE_ECHO_TIME_TOLERANCE_SECONDS;
+    (expectation.shouldSeek ||
+      Math.abs(playback.currentTime - expectation.playback.currentTime) <=
+        REMOTE_ECHO_TIME_TOLERANCE_SECONDS);
   const matchedPause =
     expectation.shouldPause &&
     playback.state === "paused" &&
-    Math.abs(playback.currentTime - expectation.playback.currentTime) <=
-      REMOTE_ECHO_TIME_TOLERANCE_SECONDS;
+    (expectation.shouldSeek ||
+      Math.abs(playback.currentTime - expectation.playback.currentTime) <=
+        REMOTE_ECHO_TIME_TOLERANCE_SECONDS);
 
   if (!matchedSeek && !matchedPlay && !matchedPause) {
     return {

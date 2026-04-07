@@ -64,6 +64,10 @@ export function createContentMessageController({
       return undefined;
     }
 
+    if (reason === "remote-apply") {
+      return undefined;
+    }
+
     if (didEpisodeChange(previousPlayback, nextPlayback)) {
       return "navigate";
     }
@@ -108,7 +112,12 @@ export function createContentMessageController({
     playback: PlaybackSnapshot,
     reason: ContentOutboundMessage["reason"],
   ) => {
-    if (!session.roomId || !session.roomPlayback || reason === "heartbeat") {
+    if (
+      !session.roomId ||
+      !session.roomPlayback ||
+      reason === "heartbeat" ||
+      reason === "remote-apply"
+    ) {
       return;
     }
 

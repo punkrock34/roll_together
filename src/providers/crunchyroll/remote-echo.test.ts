@@ -71,6 +71,36 @@ describe("remote echo suppression", () => {
     expect(afterPlay.nextExpectation).toBeUndefined();
   });
 
+  it("suppresses an early play echo before the seek settles", () => {
+    const expectation = createRemoteEchoExpectation(
+      { ...basePlayback, currentTime: 24, state: "playing" },
+      {
+        shouldPlay: true,
+        shouldPause: false,
+        shouldSeek: true,
+        targetTime: 24,
+      },
+      100,
+    );
+
+    const afterPlay = consumeRemoteEchoExpectation(
+      expectation,
+      { ...basePlayback, currentTime: 12.2, state: "playing" },
+      200,
+    );
+    const afterSeek = consumeRemoteEchoExpectation(
+      afterPlay.nextExpectation,
+      { ...basePlayback, currentTime: 24.3, state: "playing" },
+      300,
+    );
+
+    expect(afterPlay.shouldSuppress).toBe(true);
+    expect(afterPlay.nextExpectation?.shouldPlay).toBe(false);
+    expect(afterPlay.nextExpectation?.shouldSeek).toBe(true);
+    expect(afterSeek.shouldSuppress).toBe(true);
+    expect(afterSeek.nextExpectation).toBeUndefined();
+  });
+
   it("suppresses the expected pause echo once", () => {
     const expectation = createRemoteEchoExpectation(
       { ...basePlayback, currentTime: 24, state: "paused" },

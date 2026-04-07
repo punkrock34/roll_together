@@ -1,6 +1,10 @@
 import { browser } from "wxt/browser";
 
 import type { ApplyRemotePlaybackMessage } from "../../core/messages";
+import {
+  FOLLOWER_CATCHUP_DRIFT_THRESHOLD_SECONDS,
+  shouldStartFollowerCatchup,
+} from "../../core/follower-catchup";
 import { shouldWaitForHostTakeoverAlignment } from "../../core/host-transfer";
 import {
   PROTOCOL_VERSION,
@@ -101,10 +105,50 @@ export function createRoomConnectionController({
     roomId: string,
     participantCount: number,
     hostSessionId: string,
+    driftThresholdSeconds?: number,
   ) => {
-    if (!needsPlaybackCorrection(session.localPlayback, playback)) {
+    if (
+      !needsPlaybackCorrection(
+        session.localPlayback,
+        playback,
+        driftThresholdSeconds,
+      )
+    ) {
       return;
     }
+
+    postToContent(session, {
+      type: "background:apply-remote",
+      roomId,
+      participantCount,
+      hostSessionId,
+      playback,
+      driftThresholdSeconds,
+    });
+  };
+
+  const shouldUseFollowerCatchupThreshold = (
+    session: TabSession,
+    playback: PlaybackSnapshot,
+    hostSessionId: string,
+  ) =>
+    Boolean(session.sessionId) &&
+    session.sessionId !== hostSessionId &&
+    shouldStartFollowerCatchup(session.localPlayback, playback);
+
+  const handlePromotedHostPlayback = (
+    session: TabSession,
+    playback: PlaybackSnapshot,
+    roomId: string,
+    participantCount: number,
+    hostSessionId: string,
+  ) => {
+    session.pendingHostTakeoverPlayback = shouldWaitForHostTakeoverAlignment(
+      session.localPlayback,
+      playback,
+    )
+      ? playback
+      : undefined;
 
     postToContent(session, {
       type: "background:apply-remote",
@@ -227,12 +271,20 @@ export function createRoomConnectionController({
           message.roomId,
           message.participantCount,
           message.hostSessionId,
+          shouldUseFollowerCatchupThreshold(
+            session,
+            message.playback,
+            message.hostSessionId,
+          )
+            ? FOLLOWER_CATCHUP_DRIFT_THRESHOLD_SECONDS
+            : undefined,
         );
 
         publishRoomState(session);
         break;
       }
       case "sync": {
+        const previousHostSessionId = session.hostSessionId;
         session.connectionState = "connected";
         session.roomId = message.roomId;
         session.participantCount = message.participantCount;
@@ -252,6 +304,21 @@ export function createRoomConnectionController({
             message.playback,
             message.roomId,
             message.participantCount,
+            message.hostSessionId,
+          );
+        }
+
+        if (
+          previousHostSessionId !== message.hostSessionId &&
+          session.sessionId === message.hostSessionId &&
+          session.roomPlayback &&
+          session.roomId
+        ) {
+          handlePromotedHostPlayback(
+            session,
+            session.roomPlayback,
+            session.roomId,
+            session.participantCount,
             message.hostSessionId,
           );
         }
@@ -312,6 +379,13 @@ export function createRoomConnectionController({
             message.roomId,
             message.participantCount,
             message.hostSessionId,
+            shouldUseFollowerCatchupThreshold(
+              session,
+              message.playback,
+              message.hostSessionId,
+            )
+              ? FOLLOWER_CATCHUP_DRIFT_THRESHOLD_SECONDS
+              : undefined,
           );
         } else {
           navigateTabToPlayback(session, message.playback, message.roomId);
@@ -333,27 +407,37 @@ export function createRoomConnectionController({
           session.sessionId === message.hostSessionId &&
           session.sessionId !== message.previousHostSessionId;
 
-        session.pendingHostTakeoverPlayback =
-          becameHost &&
-          shouldWaitForHostTakeoverAlignment(
-            session.localPlayback,
+        if (becameHost) {
+          handlePromotedHostPlayback(
+            session,
             message.playback,
-          )
-            ? message.playback
-            : undefined;
-
-        applyRoomPlaybackIfNeeded(
-          session,
-          message.playback,
-          message.roomId,
-          message.participantCount,
-          message.hostSessionId,
-        );
+            message.roomId,
+            message.participantCount,
+            message.hostSessionId,
+          );
+        } else {
+          session.pendingHostTakeoverPlayback = undefined;
+          applyRoomPlaybackIfNeeded(
+            session,
+            message.playback,
+            message.roomId,
+            message.participantCount,
+            message.hostSessionId,
+            shouldUseFollowerCatchupThreshold(
+              session,
+              message.playback,
+              message.hostSessionId,
+            )
+              ? FOLLOWER_CATCHUP_DRIFT_THRESHOLD_SECONDS
+              : undefined,
+          );
+        }
 
         publishRoomState(session);
         break;
       }
-      case "presence":
+      case "presence": {
+        const previousHostSessionId = session.hostSessionId;
         session.participantCount = message.participantCount;
         session.participants = message.participants;
         session.hostSessionId = message.hostSessionId;
@@ -364,8 +448,25 @@ export function createRoomConnectionController({
           session.connectionState =
             session.connectionState === "switching" ? "switching" : "connected";
         }
+
+        if (
+          previousHostSessionId !== message.hostSessionId &&
+          session.sessionId === message.hostSessionId &&
+          session.roomPlayback &&
+          session.roomId
+        ) {
+          handlePromotedHostPlayback(
+            session,
+            session.roomPlayback,
+            session.roomId,
+            session.participantCount,
+            message.hostSessionId,
+          );
+        }
+
         publishRoomState(session);
         break;
+      }
       case "pong":
         break;
       case "error":

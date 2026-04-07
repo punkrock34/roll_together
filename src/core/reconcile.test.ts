@@ -57,6 +57,19 @@ describe("buildSyncDecision", () => {
     expect(decision.shouldSeek).toBe(false);
   });
 
+  it("supports a stricter drift threshold for catch-up cases", () => {
+    const decision = buildSyncDecision(
+      basePlayback,
+      {
+        ...basePlayback,
+        currentTime: 13.4,
+      },
+      1,
+    );
+
+    expect(decision.shouldSeek).toBe(true);
+  });
+
   it("skips corrections when playback is already close enough", () => {
     expect(
       needsPlaybackCorrection(basePlayback, {

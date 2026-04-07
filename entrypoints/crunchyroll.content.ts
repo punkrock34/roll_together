@@ -28,6 +28,7 @@ export default defineContentScript({
     const FALLBACK_SCAN_INTERVAL_MS = 2_000;
     const PAGE_KEY_POLL_INTERVAL_MS = 1_000;
     const KEEPALIVE_HEARTBEAT_INTERVAL_MS = 15_000;
+    const PLAYBACK_SYNC_INTERVAL_MS = 2_000;
     const TIME_JUMP_THRESHOLD_SECONDS = 3;
     const port = browser.runtime.connect({ name: CONTENT_PORT_NAME });
 
@@ -42,6 +43,21 @@ export default defineContentScript({
     let pendingRemoteRetryCount = 0;
     let playPromise: Promise<void> | undefined;
     let expectedRemoteEcho: RemoteEchoExpectation | undefined;
+    let lastSnapshotPostedAt = 0;
+    let portDisconnected = false;
+
+    const hasActiveRemoteEcho = () => {
+      if (!expectedRemoteEcho) {
+        return false;
+      }
+
+      if (Date.now() <= expectedRemoteEcho.expiresAt) {
+        return true;
+      }
+
+      expectedRemoteEcho = undefined;
+      return false;
+    };
 
     const clearPendingRemoteRetry = () => {
       if (pendingRemoteRetryTimeoutId) {
@@ -83,14 +99,12 @@ export default defineContentScript({
       pendingRemoteRetryTimeoutId = window.setTimeout(() => {
         pendingRemoteRetryTimeoutId = undefined;
         pendingRemoteRetryCount += 1;
-        if (pendingRemotePlayback) {
-          applyRemotePlayback(pendingRemotePlayback, true);
-        }
+        tryApplyPendingRemotePlayback(true);
       }, delayMs);
     };
 
     const tryApplyPendingRemotePlayback = (isRetry = false) => {
-      if (!pendingRemotePlayback) {
+      if (!pendingRemotePlayback || hasActiveRemoteEcho()) {
         return;
       }
 
@@ -118,6 +132,11 @@ export default defineContentScript({
       snapshot: PlaybackSnapshot,
       reason: ContentSnapshotReason,
     ) => {
+      if (portDisconnected) {
+        return;
+      }
+
+      lastSnapshotPostedAt = Date.now();
       const message: ContentOutboundMessage = {
         type: "content:snapshot",
         tabUrl: window.location.href,
@@ -127,7 +146,20 @@ export default defineContentScript({
         reason,
       };
 
-      port.postMessage(message);
+      try {
+        port.postMessage(message);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : "";
+        if (!errorMessage.includes("message channel is closed")) {
+          console.error("Failed to post playback snapshot", error);
+        }
+        portDisconnected = true;
+      }
     };
 
     const postSnapshot = (
@@ -146,6 +178,10 @@ export default defineContentScript({
         );
         expectedRemoteEcho = echoResult.nextExpectation;
         if (echoResult.shouldSuppress) {
+          if (!echoResult.nextExpectation) {
+            clearPendingRemotePlayback();
+          }
+          sendSnapshot(snapshot, "remote-apply");
           return;
         }
       }
@@ -173,7 +209,11 @@ export default defineContentScript({
         return;
       }
 
-      const decision = buildSyncDecision(snapshot, message.playback);
+      const decision = buildSyncDecision(
+        snapshot,
+        message.playback,
+        message.driftThresholdSeconds,
+      );
       if (
         !decision.shouldPause &&
         !decision.shouldPlay &&
@@ -188,10 +228,6 @@ export default defineContentScript({
         message.playback,
         decision,
       );
-
-      if (decision.shouldSeek) {
-        player.currentTime = decision.targetTime;
-      }
 
       if (decision.shouldPause) {
         const pausePlayer = () => {
@@ -225,6 +261,10 @@ export default defineContentScript({
             playPromise = undefined;
             schedulePendingRemotePlaybackRetry();
           });
+      }
+
+      if (decision.shouldSeek) {
+        player.currentTime = decision.targetTime;
       }
 
       schedulePendingRemotePlaybackRetry(750);
@@ -278,11 +318,17 @@ export default defineContentScript({
 
       const handleTimeUpdate = () => {
         const currentTime = candidate.currentTime;
+        const shouldPostPlaybackSync =
+          !candidate.paused &&
+          Date.now() - lastSnapshotPostedAt >= PLAYBACK_SYNC_INTERVAL_MS;
+
         if (
           lastObservedCurrentTime !== undefined &&
           Math.abs(currentTime - lastObservedCurrentTime) >
             TIME_JUMP_THRESHOLD_SECONDS
         ) {
+          postSnapshot("interaction", { suppressRemoteEcho: true });
+        } else if (shouldPostPlaybackSync) {
           postSnapshot("interaction", { suppressRemoteEcho: true });
         }
 
@@ -415,6 +461,7 @@ export default defineContentScript({
     }
 
     port.onDisconnect.addListener(() => {
+      portDisconnected = true;
       observer.disconnect();
       detachPlayer();
       clearPendingRemotePlayback();

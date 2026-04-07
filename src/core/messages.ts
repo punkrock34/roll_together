@@ -21,7 +21,8 @@ export type ContentSnapshotReason =
   | "initial"
   | "interaction"
   | "heartbeat"
-  | "navigation";
+  | "navigation"
+  | "remote-apply";
 
 export interface ContentSnapshotMessage {
   type: "content:snapshot";
@@ -40,6 +41,7 @@ export interface ApplyRemotePlaybackMessage {
   participantCount: number;
   hostSessionId: string;
   playback: PlaybackSnapshot;
+  driftThresholdSeconds?: number;
 }
 
 export type BackgroundOutboundMessage = ApplyRemotePlaybackMessage;
