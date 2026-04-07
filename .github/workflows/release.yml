@@ -102,41 +102,6 @@ jobs:
 
           cp "${SIGNED_XPI}" ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi"
 
-      - name: Authenticate Chrome Web Store publisher
-        id: chrome-auth
-        if: ${{ env.CWS_EXTENSION_ID != '' && env.CWS_PUBLISHER_ID != '' && env.CWS_SERVICE_ACCOUNT_KEY != '' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ env.CWS_SERVICE_ACCOUNT_KEY }}
-          token_format: access_token
-          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
-
-      - name: Upload Chrome package to Chrome Web Store
-        if: ${{ steps.chrome-auth.outputs.access_token != '' }}
-        env:
-          CWS_ACCESS_TOKEN: ${{ steps.chrome-auth.outputs.access_token }}
-        run: |
-          ITEM_NAME="publishers/${CWS_PUBLISHER_ID}/items/${CWS_EXTENSION_ID}"
-          ARCHIVE=".output/roll-together-extension-${{ steps.version.outputs.value }}-chrome.zip"
-
-          curl --fail-with-body \
-            -H "Authorization: Bearer ${CWS_ACCESS_TOKEN}" \
-            -X POST \
-            -T "${ARCHIVE}" \
-            "https://chromewebstore.googleapis.com/upload/v2/${ITEM_NAME}:upload"
-
-      - name: Publish Chrome Web Store submission
-        if: ${{ steps.chrome-auth.outputs.access_token != '' && env.CWS_AUTO_PUBLISH == 'true' }}
-        env:
-          CWS_ACCESS_TOKEN: ${{ steps.chrome-auth.outputs.access_token }}
-        run: |
-          ITEM_NAME="publishers/${CWS_PUBLISHER_ID}/items/${CWS_EXTENSION_ID}"
-
-          curl --fail-with-body \
-            -H "Authorization: Bearer ${CWS_ACCESS_TOKEN}" \
-            -X POST \
-            "https://chromewebstore.googleapis.com/v2/${ITEM_NAME}:publish"
-
       - name: Collect release assets
         run: |
           mkdir -p .release-assets
@@ -159,4 +124,59 @@ jobs:
               --title "Roll Together v${{ steps.version.outputs.value }}" \
               --target "${GITHUB_SHA}" \
               --generate-notes
+          fi
+
+      - name: Authenticate Chrome Web Store publisher
+        id: chrome-auth
+        if: ${{ env.CWS_EXTENSION_ID != '' && env.CWS_PUBLISHER_ID != '' && env.CWS_SERVICE_ACCOUNT_KEY != '' }}
+        continue-on-error: true
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.CWS_SERVICE_ACCOUNT_KEY }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+
+      - name: Upload Chrome package to Chrome Web Store
+        id: chrome-upload
+        if: ${{ steps.chrome-auth.outputs.access_token != '' }}
+        continue-on-error: true
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.chrome-auth.outputs.access_token }}
+        run: |
+          ITEM_NAME="publishers/${CWS_PUBLISHER_ID}/items/${CWS_EXTENSION_ID}"
+          ARCHIVE=".output/roll-together-extension-${{ steps.version.outputs.value }}-chrome.zip"
+
+          curl --fail-with-body \
+            -H "Authorization: Bearer ${CWS_ACCESS_TOKEN}" \
+            -X POST \
+            -T "${ARCHIVE}" \
+            "https://chromewebstore.googleapis.com/upload/v2/${ITEM_NAME}:upload"
+
+      - name: Publish Chrome Web Store submission
+        id: chrome-publish
+        if: ${{ steps.chrome-auth.outputs.access_token != '' && env.CWS_AUTO_PUBLISH == 'true' }}
+        continue-on-error: true
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.chrome-auth.outputs.access_token }}
+        run: |
+          ITEM_NAME="publishers/${CWS_PUBLISHER_ID}/items/${CWS_EXTENSION_ID}"
+
+          curl --fail-with-body \
+            -H "Authorization: Bearer ${CWS_ACCESS_TOKEN}" \
+            -X POST \
+            "https://chromewebstore.googleapis.com/v2/${ITEM_NAME}:publish"
+
+      - name: Report optional Chrome Web Store sync status
+        if: ${{ always() && env.CWS_EXTENSION_ID != '' && env.CWS_PUBLISHER_ID != '' && env.CWS_SERVICE_ACCOUNT_KEY != '' }}
+        run: |
+          echo "Chrome auth outcome: ${{ steps.chrome-auth.outcome }}"
+          echo "Chrome upload outcome: ${{ steps.chrome-upload.outcome }}"
+          echo "Chrome publish outcome: ${{ steps.chrome-publish.outcome }}"
+
+          if [ "${{ steps.chrome-auth.outcome }}" != "success" ]; then
+            echo "::warning::Chrome Web Store auth failed. GitHub release assets were still created."
+          elif [ "${{ steps.chrome-upload.outcome }}" != "success" ]; then
+            echo "::warning::Chrome Web Store upload failed. GitHub release assets were still created."
+          elif [ "${{ env.CWS_AUTO_PUBLISH }}" = "true" ] && [ "${{ steps.chrome-publish.outcome }}" != "success" ]; then
+            echo "::warning::Chrome Web Store publish failed. GitHub release assets were still created."
           fi

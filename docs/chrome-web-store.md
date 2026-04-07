@@ -49,6 +49,8 @@ If `CWS_AUTO_PUBLISH` is set to `true`, release tags will both upload and publis
 
 If `CWS_AUTO_PUBLISH` is empty or not `true`, the workflow will upload the package only, which is safer while you are still tuning the listing and review flow.
 
+The Chrome Web Store sync is best-effort. If Chrome auth or upload fails, the GitHub Release still completes and still includes the normal browser artifacts.
+
 ## Good default release flow
 
 1. bump the version in `package.json` and `wxt.config.ts`
