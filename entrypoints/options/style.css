@@ -207,6 +207,25 @@ button {
   color: var(--rt-muted);
 }
 
+.connection-status {
+  margin: 0;
+  min-height: 20px;
+  font-size: 13px;
+  color: var(--rt-muted);
+}
+
+.connection-status.is-pending {
+  color: var(--rt-accent-strong);
+}
+
+.connection-status.is-success {
+  color: var(--rt-success);
+}
+
+.connection-status.is-error {
+  color: var(--rt-danger);
+}
+
 @media (max-width: 900px) {
   .overview-grid,
   .utility-grid,

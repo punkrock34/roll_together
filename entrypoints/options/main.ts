@@ -14,6 +14,7 @@ import {
   type RecentRoomEntry,
   type ThemeMode,
 } from "../../src/core/storage";
+import { testBackendConnection } from "../../src/core/backend-test";
 import { applyThemeMode } from "../../src/ui/theme";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -259,8 +260,14 @@ async function render(
   const connectionActions = createElement("div", { className: "actions" });
   appendChildren(connectionActions, [
     createButton("Save Settings", "primary", "saveSettings"),
+    createButton("Test Connection", "secondary", "testConnection"),
     createButton("Restore Defaults", "secondary", "resetSettings"),
   ]);
+  const connectionStatus = createElement("p", {
+    className: "connection-status",
+    id: "connectionStatus",
+    text: "Use Test Connection to check the current HTTP and WebSocket URLs before saving.",
+  });
   appendChildren(connectionCard, [
     createSectionHead(
       "Connection",
@@ -268,6 +275,7 @@ async function render(
     ),
     fieldGrid,
     connectionActions,
+    connectionStatus,
   ]);
 
   const helpCard = createElement("section", { className: "card card-subtle" });
@@ -371,6 +379,31 @@ async function render(
 }
 
 function bindEvents() {
+  const setConnectionStatus = (
+    message: string,
+    state: "idle" | "pending" | "success" | "error",
+  ) => {
+    const status =
+      app?.querySelector<HTMLParagraphElement>("#connectionStatus");
+    if (!status) {
+      return;
+    }
+
+    status.textContent = message;
+    status.className = `connection-status is-${state}`;
+  };
+
+  const readDraftBackendSettings = () => {
+    return {
+      backendHttpUrl:
+        app?.querySelector<HTMLInputElement>("#httpUrl")?.value.trim() ??
+        DEFAULT_SETTINGS.backendHttpUrl,
+      backendWsUrl:
+        app?.querySelector<HTMLInputElement>("#wsUrl")?.value.trim() ??
+        DEFAULT_SETTINGS.backendWsUrl,
+    };
+  };
+
   app
     ?.querySelector<HTMLSelectElement>("#themeMode")
     ?.addEventListener("change", (event) => {
@@ -385,6 +418,32 @@ function bindEvents() {
       await browser.tabs.create({
         url: browser.runtime.getURL("/self-hosting.html"),
       });
+    });
+
+  app
+    ?.querySelector<HTMLButtonElement>("#testConnection")
+    ?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const { backendHttpUrl, backendWsUrl } = readDraftBackendSettings();
+
+      button.disabled = true;
+      setConnectionStatus(
+        "Testing the health endpoint and WebSocket URL...",
+        "pending",
+      );
+
+      try {
+        const result = await testBackendConnection(
+          backendHttpUrl,
+          backendWsUrl,
+        );
+        setConnectionStatus(
+          `${result.summary} ${result.health.message} ${result.websocket.message}`,
+          result.ok ? "success" : "error",
+        );
+      } finally {
+        button.disabled = false;
+      }
     });
 
   app

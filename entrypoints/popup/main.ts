@@ -16,6 +16,7 @@ import {
   type RecentRoomEntry,
   type ThemeMode,
 } from "../../src/core/storage";
+import { testBackendConnection } from "../../src/core/backend-test";
 import type {
   PopupRequestMessage,
   PopupStateResponse,
@@ -835,10 +836,18 @@ function createSettingsPanel(view: PopupViewModel) {
   const actionRow = createElement("div", { className: "action-row" });
   appendChildren(actionRow, [
     createButton("Save Settings", "primary grow", { action: "save-settings" }),
+    createButton("Test Connection", "secondary", {
+      action: "test-settings-connection",
+    }),
     createButton("Restore Defaults", "secondary", {
       action: "reset-settings",
     }),
   ]);
+  const connectionStatus = createElement("p", {
+    className: "connection-status",
+    id: "settings-connection-status",
+    text: "Use Test Connection to check the current HTTP and WebSocket URLs before saving.",
+  });
 
   appendChildren(panel, [
     head,
@@ -847,6 +856,7 @@ function createSettingsPanel(view: PopupViewModel) {
     createField("WebSocket URL", wsInput),
     createField("Theme", select),
     actionRow,
+    connectionStatus,
     createButton("Open full settings page", "link-button", {
       action: "open-options",
     }),
@@ -889,6 +899,33 @@ function bindEvents(view: PopupViewModel) {
   if (!app) {
     return;
   }
+
+  const setSettingsConnectionStatus = (
+    message: string,
+    state: "idle" | "pending" | "success" | "error",
+  ) => {
+    const status = app.querySelector<HTMLParagraphElement>(
+      "#settings-connection-status",
+    );
+    if (!status) {
+      return;
+    }
+
+    status.textContent = message;
+    status.className = `connection-status is-${state}`;
+  };
+
+  const readDraftBackendSettings = () => {
+    return {
+      backendHttpUrl:
+        app
+          .querySelector<HTMLInputElement>("#settings-http-url")
+          ?.value.trim() ?? DEFAULT_SETTINGS.backendHttpUrl,
+      backendWsUrl:
+        app.querySelector<HTMLInputElement>("#settings-ws-url")?.value.trim() ??
+        DEFAULT_SETTINGS.backendWsUrl,
+    };
+  };
 
   app.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1005,6 +1042,34 @@ function bindEvents(view: PopupViewModel) {
       uiState.notice = "Settings saved.";
       applyThemeMode(nextSettings.themeMode);
       await render();
+    });
+
+  app
+    .querySelector<HTMLButtonElement>(
+      "[data-action='test-settings-connection']",
+    )
+    ?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const { backendHttpUrl, backendWsUrl } = readDraftBackendSettings();
+
+      button.disabled = true;
+      setSettingsConnectionStatus(
+        "Testing the health endpoint and WebSocket URL...",
+        "pending",
+      );
+
+      try {
+        const result = await testBackendConnection(
+          backendHttpUrl,
+          backendWsUrl,
+        );
+        setSettingsConnectionStatus(
+          `${result.summary} ${result.health.message} ${result.websocket.message}`,
+          result.ok ? "success" : "error",
+        );
+      } finally {
+        button.disabled = false;
+      }
     });
 
   app
