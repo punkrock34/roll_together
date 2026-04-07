@@ -51,11 +51,18 @@ If `CWS_AUTO_PUBLISH` is empty or not `true`, the workflow will upload the packa
 
 The Chrome Web Store sync is best-effort. If Chrome auth or upload fails, the GitHub Release still completes and still includes the normal browser artifacts.
 
+## Listing help
+
+If you are filling in the store listing manually, use:
+
+- [Chrome Web Store submission guide](chrome-web-store-submission.md)
+- [Privacy policy draft](privacy-policy.md)
+
 ## Good default release flow
 
 1. bump the version in `package.json` and `wxt.config.ts`
 2. commit the release
-3. tag it, for example `v4.3.1`
+3. tag it, for example `v4.3.3`
 4. push the branch and tag
 5. let GitHub Actions build the release assets
 6. let the workflow upload the Chrome ZIP to the store if the Chrome Web Store credentials are configured

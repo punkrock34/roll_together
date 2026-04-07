@@ -6,14 +6,16 @@ For Chrome Web Store publishing details, see [chrome-web-store.md](chrome-web-st
 
 ## What the release workflow does
 
-When you push a tag like `v4.3.2`, GitHub Actions will:
+When you push a tag like `v4.3.3`, GitHub Actions will:
 
 1. install dependencies
 2. run lint, typecheck, and tests
 3. build Chrome and Firefox archives
 4. create or update a GitHub Release for that tag
-5. upload release assets to GitHub
+5. append the signed Firefox XPI when AMO signing is configured
 6. optionally sync the Chrome package to the Chrome Web Store
+
+GitHub release creation, Firefox signing, and Chrome Web Store syncing now run as separate jobs so the slow Firefox signing step does not block everything else.
 
 Uploaded by default:
 
@@ -60,7 +62,7 @@ If you want Chrome Web Store upload automation, also configure:
 3. Create a tag that matches the package version:
 
 ```bash
-git tag v4.3.2
+git tag v4.3.3
 git push origin main --tags
 ```
 
@@ -70,7 +72,7 @@ The workflow checks that the tag matches `package.json`. A mismatch fails the re
 
 You can also run the workflow manually from GitHub Actions.
 
-If you do, it creates or updates a release using the current `package.json` version as the tag name, for example `v4.3.2`.
+If you do, it creates or updates a release using the current `package.json` version as the tag name, for example `v4.3.3`.
 
 ## Sharing with users
 

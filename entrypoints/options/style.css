@@ -22,6 +22,27 @@ main {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.overview-grid,
+.utility-grid,
+.history-grid,
+.field-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.overview-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.utility-grid,
+.history-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .eyebrow,
 .muted {
   color: var(--rt-muted);
@@ -51,6 +72,24 @@ label {
   display: grid;
   gap: 6px;
   font-size: 14px;
+}
+
+.metric-card {
+  gap: 8px;
+  min-height: 148px;
+}
+
+.metric-value {
+  font-size: 26px;
+  line-height: 1.05;
+}
+
+.card-subtle {
+  background: linear-gradient(
+    180deg,
+    var(--rt-panel) 0%,
+    var(--rt-panel-strong) 100%
+  );
 }
 
 input,
@@ -120,4 +159,21 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hint-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+  color: var(--rt-muted);
+}
+
+@media (max-width: 900px) {
+  .overview-grid,
+  .utility-grid,
+  .history-grid,
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
 }

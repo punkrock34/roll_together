@@ -10,15 +10,11 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
-    env:
-      AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
-      AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
-      CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
-      CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
-      CWS_SERVICE_ACCOUNT_KEY: ${{ secrets.CWS_SERVICE_ACCOUNT_KEY }}
-      CWS_AUTO_PUBLISH: ${{ vars.CWS_AUTO_PUBLISH }}
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      tag: ${{ steps.tag.outputs.value }}
 
     steps:
       - name: Checkout
@@ -28,7 +24,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Read package version
         id: version
@@ -54,6 +49,20 @@ jobs:
             echo "value=v${{ steps.version.outputs.value }}" >> "$GITHUB_OUTPUT"
           fi
 
+  build-assets:
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
       - name: Install dependencies
         run: npm ci
 
@@ -68,7 +77,69 @@ jobs:
           npm run zip:chrome
           npm run zip:firefox
 
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ needs.prepare.outputs.version }}
+          path: |
+            .output/roll-together-extension-${{ needs.prepare.outputs.version }}-chrome.zip
+            .output/roll-together-extension-${{ needs.prepare.outputs.version }}-firefox.zip
+            .output/roll-together-extension-${{ needs.prepare.outputs.version }}-sources.zip
+          if-no-files-found: error
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: [prepare, build-assets]
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-${{ needs.prepare.outputs.version }}
+          path: .release-assets
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ needs.prepare.outputs.tag }}" >/dev/null 2>&1; then
+            gh release upload "${{ needs.prepare.outputs.tag }}" .release-assets/* --clobber
+          else
+            gh release create "${{ needs.prepare.outputs.tag }}" .release-assets/* \
+              --title "Roll Together v${{ needs.prepare.outputs.version }}" \
+              --target "${GITHUB_SHA}" \
+              --generate-notes
+          fi
+
+  firefox-sign:
+    runs-on: ubuntu-latest
+    needs: [prepare, github-release]
+    env:
+      AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+      AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+
+    steps:
+      - name: Checkout
+        if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
+        run: npm ci
+
+      - name: Build Firefox package
+        if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
+        run: npm run build:firefox
+
       - name: Sign Firefox XPI for self-distribution
+        id: sign
         if: ${{ env.AMO_API_KEY != '' && env.AMO_API_SECRET != '' }}
         env:
           WEB_EXT_API_KEY: ${{ env.AMO_API_KEY }}
@@ -85,8 +156,9 @@ jobs:
           set -e
 
           if [ "${SIGN_EXIT_CODE}" -ne 0 ]; then
-            if grep -q "Version ${{ steps.version.outputs.value }} already exists." "${SIGN_OUTPUT}"; then
-              echo "Firefox version ${{ steps.version.outputs.value }} is already signed on AMO. Skipping re-sign on rerun."
+            if grep -q "Version ${{ needs.prepare.outputs.version }} already exists." "${SIGN_OUTPUT}"; then
+              echo "already_exists=true" >> "$GITHUB_OUTPUT"
+              echo "Firefox version ${{ needs.prepare.outputs.version }} is already signed on AMO. Skipping re-sign on rerun."
               exit 0
             fi
 
@@ -100,31 +172,40 @@ jobs:
             exit 1
           fi
 
-          cp "${SIGNED_XPI}" ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi"
+          TARGET_XPI=".output/roll-together-extension-${{ needs.prepare.outputs.version }}-firefox-signed.xpi"
+          cp "${SIGNED_XPI}" "${TARGET_XPI}"
+          echo "signed_xpi=${TARGET_XPI}" >> "$GITHUB_OUTPUT"
 
-      - name: Collect release assets
-        run: |
-          mkdir -p .release-assets
-          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-chrome.zip" .release-assets/
-          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox.zip" .release-assets/
-          cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-sources.zip" .release-assets/
-
-          if [ -f ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi" ]; then
-            cp ".output/roll-together-extension-${{ steps.version.outputs.value }}-firefox-signed.xpi" .release-assets/
-          fi
-
-      - name: Create or update GitHub release
+      - name: Upload signed Firefox XPI to GitHub release
+        if: ${{ steps.sign.outputs.signed_xpi != '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "${{ steps.tag.outputs.value }}" >/dev/null 2>&1; then
-            gh release upload "${{ steps.tag.outputs.value }}" .release-assets/* --clobber
-          else
-            gh release create "${{ steps.tag.outputs.value }}" .release-assets/* \
-              --title "Roll Together v${{ steps.version.outputs.value }}" \
-              --target "${GITHUB_SHA}" \
-              --generate-notes
-          fi
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            "${{ steps.sign.outputs.signed_xpi }}" \
+            --clobber
+
+      - name: Report Firefox rerun state
+        if: ${{ steps.sign.outputs.already_exists == 'true' }}
+        run: |
+          echo "::warning::Firefox version ${{ needs.prepare.outputs.version }} was already signed on AMO, so no new signed XPI was generated in this rerun."
+
+  chrome-store:
+    runs-on: ubuntu-latest
+    needs: [prepare, build-assets]
+    env:
+      CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+      CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+      CWS_SERVICE_ACCOUNT_KEY: ${{ secrets.CWS_SERVICE_ACCOUNT_KEY }}
+      CWS_AUTO_PUBLISH: ${{ vars.CWS_AUTO_PUBLISH }}
+
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.CWS_EXTENSION_ID != '' && env.CWS_PUBLISHER_ID != '' && env.CWS_SERVICE_ACCOUNT_KEY != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-${{ needs.prepare.outputs.version }}
+          path: .release-assets
 
       - name: Authenticate Chrome Web Store publisher
         id: chrome-auth
@@ -144,7 +225,7 @@ jobs:
           CWS_ACCESS_TOKEN: ${{ steps.chrome-auth.outputs.access_token }}
         run: |
           ITEM_NAME="publishers/${CWS_PUBLISHER_ID}/items/${CWS_EXTENSION_ID}"
-          ARCHIVE=".output/roll-together-extension-${{ steps.version.outputs.value }}-chrome.zip"
+          ARCHIVE=".release-assets/roll-together-extension-${{ needs.prepare.outputs.version }}-chrome.zip"
 
           curl --fail-with-body \
             -H "Authorization: Bearer ${CWS_ACCESS_TOKEN}" \

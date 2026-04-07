@@ -72,6 +72,8 @@ npm run dev:firefox
 - [Architecture notes](docs/architecture.md)
 - [Release guide](docs/releases.md)
 - [Chrome Web Store notes](docs/chrome-web-store.md)
+- [Chrome Web Store submission guide](docs/chrome-web-store-submission.md)
+- [Privacy policy draft](docs/privacy-policy.md)
 
 ---
 

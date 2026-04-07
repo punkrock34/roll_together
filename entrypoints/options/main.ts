@@ -72,6 +72,26 @@ function createSectionHead(title: string, description: string) {
   return head;
 }
 
+function createMetricCard(label: string, value: string, description: string) {
+  const card = createElement("section", { className: "card metric-card" });
+  appendChildren(card, [
+    createElement("span", { className: "eyebrow", text: label }),
+    createElement("strong", { className: "metric-value", text: value }),
+    createElement("p", { className: "muted", text: description }),
+  ]);
+  return card;
+}
+
+function createHintList(items: string[]) {
+  const list = createElement("ul", { className: "hint-list" });
+  for (const item of items) {
+    const row = createElement("li");
+    row.textContent = item;
+    list.appendChild(row);
+  }
+  return list;
+}
+
 function createLabelledInput(
   labelText: string,
   id: string,
@@ -168,6 +188,15 @@ function createWatchProgressItem(title: string, durationLabel: string) {
   return item;
 }
 
+function formatBackendLabel(backendHttpUrl: string) {
+  try {
+    const parsed = new URL(backendHttpUrl);
+    return parsed.host;
+  } catch {
+    return backendHttpUrl.replace(/^https?:\/\//, "");
+  }
+}
+
 async function render(
   status = "Adjust backend settings, local history, and theme preferences here.",
 ) {
@@ -196,7 +225,37 @@ async function render(
     createElement("p", { className: "muted", text: status }),
   ]);
 
+  const overviewGrid = createElement("section", { className: "overview-grid" });
+  appendChildren(overviewGrid, [
+    createMetricCard(
+      "Saved Rooms",
+      `${recentRooms.length}`,
+      recentRooms.length === 1
+        ? "One room shortcut saved locally."
+        : "Room shortcuts saved in this browser profile.",
+    ),
+    createMetricCard(
+      "Watched Entries",
+      `${watchProgress.length}`,
+      watchProgress.length === 0
+        ? "No local progress snapshots yet."
+        : "Progress stays in local browser storage.",
+    ),
+    createMetricCard(
+      "Backend",
+      formatBackendLabel(settings.backendHttpUrl),
+      "This is the server the extension will try to use.",
+    ),
+  ]);
+
   const connectionCard = createElement("section", { className: "card" });
+  const fieldGrid = createElement("div", { className: "field-grid" });
+  appendChildren(fieldGrid, [
+    createLabelledInput("Display Name", "displayName", settings.displayName),
+    createThemeSelect(settings.themeMode),
+    createLabelledInput("HTTP Base URL", "httpUrl", settings.backendHttpUrl),
+    createLabelledInput("WebSocket URL", "wsUrl", settings.backendWsUrl),
+  ]);
   const connectionActions = createElement("div", { className: "actions" });
   appendChildren(connectionActions, [
     createButton("Save Settings", "primary", "saveSettings"),
@@ -207,11 +266,21 @@ async function render(
       "Connection",
       "Point the extension at any backend you want to use.",
     ),
-    createLabelledInput("Display Name", "displayName", settings.displayName),
-    createLabelledInput("HTTP Base URL", "httpUrl", settings.backendHttpUrl),
-    createLabelledInput("WebSocket URL", "wsUrl", settings.backendWsUrl),
-    createThemeSelect(settings.themeMode),
+    fieldGrid,
     connectionActions,
+  ]);
+
+  const helpCard = createElement("section", { className: "card card-subtle" });
+  appendChildren(helpCard, [
+    createSectionHead(
+      "Setup Notes",
+      "A few quick reminders that make self-hosted setup less painful.",
+    ),
+    createHintList([
+      "Use https://your-domain and wss://your-domain/ws when you place the backend behind a reverse proxy.",
+      "The popup can change backend URLs too, but this page is better for full maintenance.",
+      "Saved rooms and watched progress live only in this browser profile.",
+    ]),
   ]);
 
   const roomsCard = createElement("section", { className: "card" });
@@ -271,13 +340,27 @@ async function render(
   );
   progressCard.appendChild(progressActions);
 
-  appendChildren(main, [headerCard, connectionCard, roomsCard, progressCard]);
+  const utilityGrid = createElement("section", { className: "utility-grid" });
+  appendChildren(utilityGrid, [connectionCard, helpCard]);
+
+  const historyGrid = createElement("section", { className: "history-grid" });
+  appendChildren(historyGrid, [roomsCard, progressCard]);
+
+  appendChildren(main, [headerCard, overviewGrid, utilityGrid, historyGrid]);
   app.replaceChildren(main);
 
   bindEvents();
 }
 
 function bindEvents() {
+  app
+    ?.querySelector<HTMLSelectElement>("#themeMode")
+    ?.addEventListener("change", (event) => {
+      const nextTheme = (event.currentTarget as HTMLSelectElement)
+        .value as ThemeMode;
+      applyThemeMode(nextTheme);
+    });
+
   app
     ?.querySelector<HTMLButtonElement>("#saveSettings")
     ?.addEventListener("click", async () => {
