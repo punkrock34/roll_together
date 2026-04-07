@@ -44,6 +44,17 @@ export function arePlaybackSnapshotsSimilar(
   );
 }
 
+export function shouldAcceptRoomPlaybackUpdate(
+  current: PlaybackSnapshot | undefined,
+  next: PlaybackSnapshot,
+) {
+  if (!current) {
+    return true;
+  }
+
+  return next.updatedAt >= current.updatedAt;
+}
+
 export function needsPlaybackCorrection(
   local: PlaybackSnapshot | undefined,
   remote: PlaybackSnapshot | undefined,

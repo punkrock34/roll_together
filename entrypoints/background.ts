@@ -1,4 +1,4 @@
-import { browser, type Browser } from "wxt/browser";
+import { browser } from "wxt/browser";
 
 import {
   CONTENT_PORT_NAME,
@@ -8,109 +8,31 @@ import {
   type ContentOutboundMessage,
   type PopupRequestMessage,
   type PopupStateResponse,
-  type RoomConnectionStatus,
 } from "../src/core/messages";
+import { DEFAULT_SETTINGS, type ExtensionSettings } from "../src/core/storage";
+import { resolveRoomIdForTabContext } from "../src/providers/crunchyroll/session";
 import {
-  PROTOCOL_VERSION,
-  type JoinMessage,
-  type NavigateMessage,
-  type ParticipantPresence,
-  parseServerMessage,
-  type PingMessage,
-  type PlaybackSnapshot,
-  type ServerMessage,
-  type SyncMessage,
-} from "../src/core/protocol";
+  clearActionState,
+  updateActionState,
+} from "../src/platform/background/action-state";
+import { createContentMessageController } from "../src/platform/background/content-messages";
+import { createPopupStateController } from "../src/platform/background/popup-state";
+import { createRoomConnectionController } from "../src/platform/background/room-connection";
+import { isIgnorablePortError } from "../src/platform/background/runtime-errors";
 import {
-  DEFAULT_SETTINGS,
-  getSettings,
-  getWatchProgressForEpisode,
-  listRecentRooms,
-  type ExtensionSettings,
-  upsertRecentRoom,
-  upsertWatchProgress,
-} from "../src/core/storage";
-import {
-  arePlaybackSnapshotsSimilar,
-  buildSyncDecision,
-  needsPlaybackCorrection,
-} from "../src/core/reconcile";
-import { buildRoomInviteUrl, getRoomIdFromUrl } from "../src/core/url";
-import { isCrunchyrollUrl } from "../src/providers/crunchyroll/player";
-import {
-  didEpisodeChange,
-  normalizePlaybackSnapshotForTab,
-  resolveRoomIdForTabContext,
-} from "../src/providers/crunchyroll/session";
+  getActivePort,
+  getOrCreateSession,
+  type TabSession,
+} from "../src/platform/background/session-state";
 
-interface TabSession {
-  tabId: number;
-  ports: Map<number, Browser.runtime.Port>;
-  activeFrameId?: number;
-  tabUrl?: string;
-  tabTitle?: string;
-  localPlayback?: PlaybackSnapshot;
-  roomPlayback?: PlaybackSnapshot;
-  roomIdFromUrl?: string | null;
-  roomId?: string;
-  sessionId?: string;
-  hostSessionId?: string;
-  participantCount: number;
-  participants: ParticipantPresence[];
-  connectionState: RoomConnectionStatus;
-  lastError?: string;
-  socket?: WebSocket;
-  pingInterval?: ReturnType<typeof setInterval>;
-  reconnectTimeout?: ReturnType<typeof setTimeout>;
-  cleanupTimeout?: ReturnType<typeof setTimeout>;
-  autoJoinSuppressedRoomId?: string;
-  lastOutboundPlayback?: PlaybackSnapshot;
-  lastOutboundAt?: number;
-  lastWatchProgressAt?: number;
-  reconnectAttempt: number;
-}
-
-const DEFAULT_ACTION_TITLE = "Roll Together";
 const NAVIGATION_CLEANUP_TIMEOUT_MS = 12_000;
 const DISCONNECTED_CLEANUP_TIMEOUT_MS = 3_000;
-const HOST_HEARTBEAT_INTERVAL_MS = 4_000;
-const WATCH_PROGRESS_WRITE_INTERVAL_MS = 15_000;
-const RECONNECT_DELAYS_MS = [250, 750, 1_500, 3_000];
 
 export default defineBackground({
   type: "module",
   main() {
     const sessions = new Map<number, TabSession>();
-    const popupStatePorts = new Set<Browser.runtime.Port>();
-    let popupStatePublishScheduled = false;
-
-    const getOrCreateSession = (tabId: number): TabSession => {
-      const existing = sessions.get(tabId);
-      if (existing) {
-        return existing;
-      }
-
-      const created: TabSession = {
-        tabId,
-        ports: new Map<number, Browser.runtime.Port>(),
-        participantCount: 1,
-        participants: [],
-        connectionState: "ready",
-        reconnectAttempt: 0,
-      };
-      sessions.set(tabId, created);
-      return created;
-    };
-
-    const getActivePort = (
-      session: TabSession,
-    ): Browser.runtime.Port | undefined => {
-      if (session.activeFrameId !== undefined) {
-        return session.ports.get(session.activeFrameId);
-      }
-
-      return session.ports.values().next().value;
-    };
+    const popupStateController = createPopupStateController({ sessions });
 
     const postToContent = (
       session: TabSession,
@@ -130,816 +52,46 @@ export default defineBackground({
       }
     };
 
-    const postPopupState = (
-      port: Browser.runtime.Port,
-      response: PopupStateResponse,
-    ) => {
-      try {
-        port.postMessage(response);
-      } catch (error) {
-        if (!isIgnorablePortError(error)) {
-          console.error("Failed to post popup state", error);
-        }
-      }
-    };
-
-    const buildActivePopupState = async (): Promise<PopupStateResponse> => {
-      const activeTab = (
-        await browser.tabs.query({
-          active: true,
-          currentWindow: true,
-        })
-      )[0];
-      const settings = await getSettings();
-      const recentRooms = await listRecentRooms();
-
-      if (!activeTab?.id) {
-        return {
-          supported: false,
-          providerReady: false,
-          connectionState: "unsupported",
-          participantCount: 0,
-          participants: [],
-          backendHttpUrl: settings.backendHttpUrl,
-          backendWsUrl: settings.backendWsUrl,
-          displayName: settings.displayName,
-          recentRooms,
-          themeMode: settings.themeMode,
-          isHost: false,
-        };
-      }
-
-      const session = sessions.get(activeTab.id);
-      const supported =
-        typeof activeTab.url === "string" && isCrunchyrollUrl(activeTab.url);
-      const shareUrl =
-        activeTab.url && session?.roomId
-          ? buildRoomInviteUrl(activeTab.url, session.roomId)
-          : undefined;
-      const currentPlayback = session?.roomPlayback ?? session?.localPlayback;
-
-      return {
-        activeTabId: activeTab.id,
-        activeTabUrl: activeTab.url,
-        supported,
-        providerReady: Boolean(session?.localPlayback),
-        connectionState: supported
-          ? (session?.connectionState ?? "ready")
-          : "unsupported",
-        roomId: session?.roomId,
-        shareUrl,
-        participantCount: session?.participantCount ?? 0,
-        participants: session?.participants ?? [],
-        episodeTitle: currentPlayback?.episodeTitle,
-        backendHttpUrl: settings.backendHttpUrl,
-        backendWsUrl: settings.backendWsUrl,
-        displayName: settings.displayName,
-        recentRooms,
-        watchProgress: await getWatchProgressForEpisode(
-          currentPlayback?.episodeUrl,
-        ),
-        lastError: session?.lastError,
-        hostSessionId: session?.hostSessionId,
-        sessionId: session?.sessionId,
-        isHost:
-          Boolean(session?.sessionId) &&
-          session?.hostSessionId === session?.sessionId,
-        themeMode: settings.themeMode,
-      };
-    };
-
-    const safeBuildActivePopupState = async (): Promise<PopupStateResponse> => {
-      try {
-        return await buildActivePopupState();
-      } catch (error) {
-        console.error("Failed to build popup state", error);
-      }
-
-      const settings = await getSettings();
-      const recentRooms = await listRecentRooms();
-      return {
-        supported: false,
-        providerReady: false,
-        connectionState: "unsupported",
-        participantCount: 0,
-        participants: [],
-        backendHttpUrl: settings.backendHttpUrl,
-        backendWsUrl: settings.backendWsUrl,
-        displayName: settings.displayName,
-        recentRooms,
-        themeMode: settings.themeMode,
-        lastError: "Unable to read extension state.",
-        isHost: false,
-      };
-    };
-
-    const publishPopupStates = async () => {
-      popupStatePublishScheduled = false;
-
-      if (popupStatePorts.size === 0) {
-        return;
-      }
-
-      const response = await safeBuildActivePopupState();
-      for (const port of popupStatePorts) {
-        postPopupState(port, response);
-      }
-    };
-
-    const queuePopupStatePublish = () => {
-      if (popupStatePorts.size === 0 || popupStatePublishScheduled) {
-        return;
-      }
-
-      popupStatePublishScheduled = true;
-      queueMicrotask(() => {
-        void publishPopupStates();
-      });
-    };
-
     const publishRoomState = (session: TabSession) => {
       updateActionState(session);
-      queuePopupStatePublish();
+      popupStateController.queuePopupStatePublish();
     };
 
-    const updateActionState = (session: TabSession) => {
-      runActionUpdate(
-        browser.action.setTitle({
-          tabId: session.tabId,
-          title: getActionTitle(session),
-        }),
-      );
-
-      const badgeText = getActionBadgeText(session);
-      runActionUpdate(
-        browser.action.setBadgeText({
-          tabId: session.tabId,
-          text: badgeText,
-        }),
-      );
-
-      if (!badgeText) {
-        return;
-      }
-
-      runActionUpdate(
-        browser.action.setBadgeBackgroundColor({
-          tabId: session.tabId,
-          color: getActionBadgeColor(session),
-        }),
-      );
-    };
-
-    const clearActionState = (tabId: number) => {
-      runActionUpdate(
-        browser.action.setTitle({
-          tabId,
-          title: DEFAULT_ACTION_TITLE,
-        }),
-      );
-      runActionUpdate(
-        browser.action.setBadgeText({
-          tabId,
-          text: "",
-        }),
-      );
-    };
-
-    const stopPing = (session: TabSession) => {
-      if (session.pingInterval) {
-        clearInterval(session.pingInterval);
-        session.pingInterval = undefined;
-      }
-    };
-
-    const stopReconnect = (session: TabSession) => {
-      if (session.reconnectTimeout) {
-        clearTimeout(session.reconnectTimeout);
-        session.reconnectTimeout = undefined;
-      }
-    };
-
-    const closeSocket = (
-      session: TabSession,
-      options: {
-        clearRoom: boolean;
-        clearIdentity: boolean;
-        suppressReconnect: boolean;
-        sendLeave: boolean;
-      },
-    ) => {
-      stopPing(session);
-      stopReconnect(session);
-
-      const socket = session.socket as
-        | (WebSocket & { __rtSuppressReconnect?: boolean })
-        | undefined;
-      session.socket = undefined;
-
-      if (socket) {
-        socket.__rtSuppressReconnect = options.suppressReconnect;
-        if (options.sendLeave && socket.readyState === WebSocket.OPEN) {
-          socket.send(
-            JSON.stringify({ type: "leave", version: PROTOCOL_VERSION }),
-          );
-        }
-        socket.close();
-      }
-
-      if (options.clearRoom) {
-        session.roomId = undefined;
-        session.hostSessionId = undefined;
-        session.roomPlayback = undefined;
-        session.participantCount = 1;
-        session.participants = [];
-      }
-
-      if (options.clearIdentity) {
-        session.sessionId = undefined;
-      }
-    };
-
-    const scheduleReconnect = (session: TabSession, roomId: string) => {
-      stopReconnect(session);
-      const delayMs =
-        RECONNECT_DELAYS_MS[
-          Math.min(session.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)
-        ];
-      session.reconnectAttempt += 1;
-      session.reconnectTimeout = setTimeout(() => {
-        if (!getActivePort(session) || !session.localPlayback) {
-          return;
-        }
-        void connectSession(session, roomId);
-      }, delayMs);
-    };
-
-    const connectSession = async (
-      session: TabSession,
-      requestedRoomId?: string,
-    ) => {
-      if (!session.localPlayback) {
-        return;
-      }
-
-      const settings = await getSettings();
-
-      closeSocket(session, {
-        clearRoom: false,
-        clearIdentity: false,
-        suppressReconnect: true,
-        sendLeave: false,
-      });
-
-      session.connectionState = "connecting";
-      session.lastError = undefined;
-      publishRoomState(session);
-
-      const socket = new WebSocket(settings.backendWsUrl) as WebSocket & {
-        __rtSuppressReconnect?: boolean;
-      };
-      session.socket = socket;
-
-      socket.addEventListener("open", () => {
-        if (session.socket !== socket || !session.localPlayback) {
-          return;
-        }
-
-        session.reconnectAttempt = 0;
-
-        const joinMessage: JoinMessage = {
-          type: "join",
-          version: PROTOCOL_VERSION,
-          roomId: requestedRoomId,
-          sessionId: session.sessionId,
-          displayName: settings.displayName,
-          playback: session.localPlayback,
-        };
-
-        socket.send(JSON.stringify(joinMessage));
-
-        session.pingInterval = setInterval(() => {
-          if (socket.readyState !== WebSocket.OPEN) {
-            return;
-          }
-
-          const pingMessage: PingMessage = {
-            type: "ping",
-            version: PROTOCOL_VERSION,
-            sentAt: Date.now(),
-          };
-
-          socket.send(JSON.stringify(pingMessage));
-        }, 20_000);
-      });
-
-      socket.addEventListener("message", (event) => {
-        if (session.socket !== socket || typeof event.data !== "string") {
-          return;
-        }
-
-        const message = parseServerMessage(event.data);
-        if (!message) {
-          return;
-        }
-
-        handleServerMessage(session, message);
-      });
-
-      socket.addEventListener("error", () => {
-        if (session.socket !== socket) {
-          return;
-        }
-
-        session.connectionState = "error";
-        session.lastError = "Unable to reach the Roll Together backend.";
-        publishRoomState(session);
-      });
-
-      socket.addEventListener("close", () => {
-        stopPing(session);
-
-        if (session.socket === socket) {
-          session.socket = undefined;
-        }
-
-        if (socket.__rtSuppressReconnect) {
-          return;
-        }
-
-        if (!getActivePort(session)) {
-          return;
-        }
-
-        const reconnectRoomId = session.roomId ?? requestedRoomId;
-        if (reconnectRoomId) {
-          session.connectionState = "connecting";
-          publishRoomState(session);
-          scheduleReconnect(session, reconnectRoomId);
-        }
-      });
-    };
-
-    const navigateTabToPlayback = (
-      session: TabSession,
-      playback: PlaybackSnapshot,
-      roomId: string,
-    ) => {
-      const targetUrl = buildRoomInviteUrl(playback.episodeUrl, roomId);
-      session.connectionState = "switching";
-      session.lastError = undefined;
-      session.roomPlayback = playback;
-      session.tabUrl = targetUrl;
-      publishRoomState(session);
-
-      void browser.tabs
-        .update(session.tabId, { url: targetUrl })
-        .catch((error) => {
-          if (!isIgnorableTabLifecycleError(error)) {
-            console.error("Failed to navigate room tab", error);
-          }
-        });
-    };
-
-    const sendRoomUpdate = (
-      session: TabSession,
-      type: "sync" | "navigate",
-      playback: PlaybackSnapshot,
-    ) => {
-      if (!session.socket || session.socket.readyState !== WebSocket.OPEN) {
-        return;
-      }
-
-      const payload: SyncMessage | NavigateMessage =
-        type === "navigate"
-          ? {
-              type,
-              version: PROTOCOL_VERSION,
-              playback,
-            }
-          : {
-              type,
-              version: PROTOCOL_VERSION,
-              playback,
-            };
-
-      session.socket.send(JSON.stringify(payload));
-      session.roomPlayback = playback;
-      session.lastOutboundPlayback = playback;
-      session.lastOutboundAt = Date.now();
-    };
-
-    const applyRoomPlaybackIfNeeded = (
-      session: TabSession,
-      playback: PlaybackSnapshot,
-      roomId: string,
-      participantCount: number,
-      hostSessionId: string,
-    ) => {
-      if (!needsPlaybackCorrection(session.localPlayback, playback)) {
-        return;
-      }
-
-      postToContent(session, {
-        type: "background:apply-remote",
-        roomId,
-        participantCount,
-        hostSessionId,
-        playback,
-      });
-    };
-
-    const shouldSendHostUpdate = (
-      session: TabSession,
-      previousPlayback: PlaybackSnapshot | undefined,
-      nextPlayback: PlaybackSnapshot,
-      reason: ContentOutboundMessage["reason"],
-    ): "sync" | "navigate" | undefined => {
-      if (!session.roomId || !session.sessionId || !session.hostSessionId) {
-        return undefined;
-      }
-
-      if (session.hostSessionId !== session.sessionId) {
-        return undefined;
-      }
-
-      if (didEpisodeChange(previousPlayback, nextPlayback)) {
-        return "navigate";
-      }
-
-      if (reason === "heartbeat") {
-        if (nextPlayback.state !== "playing") {
-          return undefined;
-        }
-
-        const enoughTimePassed =
-          !session.lastOutboundAt ||
-          Date.now() - session.lastOutboundAt >= HOST_HEARTBEAT_INTERVAL_MS;
-        if (
-          enoughTimePassed &&
-          !arePlaybackSnapshotsSimilar(
-            session.lastOutboundPlayback,
-            nextPlayback,
-            1,
-          )
-        ) {
-          return "sync";
-        }
-
-        return undefined;
-      }
-
-      if (
-        !arePlaybackSnapshotsSimilar(
-          session.lastOutboundPlayback,
-          nextPlayback,
-          0.15,
-        )
-      ) {
-        return "sync";
-      }
-
-      return undefined;
-    };
-
-    const handleFollowerCorrection = (
-      session: TabSession,
-      playback: PlaybackSnapshot,
-      reason: ContentOutboundMessage["reason"],
-    ) => {
-      if (!session.roomId || !session.roomPlayback || reason === "heartbeat") {
-        return;
-      }
-
-      const decision = buildSyncDecision(playback, session.roomPlayback);
-      if (
-        playback.episodeUrl !== session.roomPlayback.episodeUrl ||
-        decision.shouldPause ||
-        decision.shouldPlay ||
-        decision.shouldSeek
-      ) {
-        postToContent(session, {
-          type: "background:apply-remote",
-          roomId: session.roomId,
-          participantCount: session.participantCount,
-          hostSessionId: session.hostSessionId ?? "",
-          playback: session.roomPlayback,
-        });
-      }
-    };
-
-    const handleServerMessage = (
-      session: TabSession,
-      message: ServerMessage,
-    ) => {
-      switch (message.type) {
-        case "joined": {
-          session.connectionState = "connected";
-          session.roomId = message.roomId;
-          session.sessionId = message.sessionId;
-          session.hostSessionId = message.hostSessionId;
-          session.participantCount = message.participantCount;
-          session.participants = message.participants;
-          session.lastError = undefined;
-          session.roomPlayback = message.playback;
-
-          const shareUrl =
-            session.tabUrl && session.roomId
-              ? buildRoomInviteUrl(session.tabUrl, session.roomId)
-              : undefined;
-
-          if (shareUrl) {
-            void upsertRecentRoom({
-              roomId: session.roomId,
-              shareUrl,
-              episodeTitle: message.playback.episodeTitle,
-              episodeUrl: message.playback.episodeUrl,
-              updatedAt: Date.now(),
-            })
-              .then(() => {
-                queuePopupStatePublish();
-              })
-              .catch((error) => {
-                console.error("Failed to save recent room", error);
-              });
-          }
-
-          applyRoomPlaybackIfNeeded(
-            session,
-            message.playback,
-            message.roomId,
-            message.participantCount,
-            message.hostSessionId,
-          );
-
-          publishRoomState(session);
-          break;
-        }
-        case "sync":
-          session.connectionState = "connected";
-          session.participantCount = message.participantCount;
-          session.participants = message.participants;
-          session.hostSessionId = message.hostSessionId;
-          session.roomPlayback = message.playback;
-          session.lastError = undefined;
-          applyRoomPlaybackIfNeeded(
-            session,
-            message.playback,
-            message.roomId,
-            message.participantCount,
-            message.hostSessionId,
-          );
-          publishRoomState(session);
-          break;
-        case "navigate":
-          session.roomId = message.roomId;
-          session.participantCount = message.participantCount;
-          session.participants = message.participants;
-          session.hostSessionId = message.hostSessionId;
-          session.roomPlayback = message.playback;
-          session.lastError = undefined;
-
-          void upsertRecentRoom({
-            roomId: message.roomId,
-            shareUrl: buildRoomInviteUrl(
-              message.playback.episodeUrl,
-              message.roomId,
-            ),
-            episodeTitle: message.playback.episodeTitle,
-            episodeUrl: message.playback.episodeUrl,
-            updatedAt: Date.now(),
-          })
-            .then(() => {
-              queuePopupStatePublish();
-            })
-            .catch((error) => {
-              console.error("Failed to save navigated room", error);
-            });
-
-          if (
-            session.localPlayback?.episodeUrl === message.playback.episodeUrl
-          ) {
-            session.connectionState = "connected";
-            applyRoomPlaybackIfNeeded(
-              session,
-              message.playback,
-              message.roomId,
-              message.participantCount,
-              message.hostSessionId,
-            );
-          } else {
-            navigateTabToPlayback(session, message.playback, message.roomId);
-          }
-          publishRoomState(session);
-          break;
-        case "presence":
-          session.participantCount = message.participantCount;
-          session.participants = message.participants;
-          session.hostSessionId = message.hostSessionId;
-          if (session.roomId) {
-            session.connectionState =
-              session.connectionState === "switching"
-                ? "switching"
-                : "connected";
-          }
-          publishRoomState(session);
-          break;
-        case "pong":
-          break;
-        case "error":
-          if (
-            message.code === "not_host" &&
-            session.roomPlayback &&
-            session.roomId
-          ) {
-            session.connectionState = "connected";
-            session.lastError = "Only the host can control this room.";
-            postToContent(session, {
-              type: "background:apply-remote",
-              roomId: session.roomId,
-              participantCount: session.participantCount,
-              hostSessionId: session.hostSessionId ?? "",
-              playback: session.roomPlayback,
-            });
-          } else {
-            session.connectionState = "error";
-            session.lastError = message.message;
-          }
-          publishRoomState(session);
-          break;
-      }
-    };
-
-    const maybeAutoJoin = (session: TabSession) => {
-      if (!session.localPlayback || !session.roomIdFromUrl) {
-        return;
-      }
-
-      if (session.autoJoinSuppressedRoomId === session.roomIdFromUrl) {
-        return;
-      }
-
-      if (
-        session.connectionState === "connected" &&
-        session.roomId === session.roomIdFromUrl
-      ) {
-        return;
-      }
-
-      if (
-        session.connectionState === "connecting" ||
-        session.connectionState === "switching"
-      ) {
-        return;
-      }
-
-      void connectSession(session, session.roomIdFromUrl);
-    };
-
-    const resolveTabContext = (
-      session: TabSession,
-      message: ContentOutboundMessage,
-      port: Browser.runtime.Port,
-    ) => {
-      return {
-        tabUrl: session.tabUrl ?? port.sender?.tab?.url ?? message.tabUrl,
-        tabTitle:
-          session.tabTitle ??
-          port.sender?.tab?.title ??
-          message.episode.episodeTitle,
-      };
-    };
-
-    const shouldPersistWatchProgress = (
-      session: TabSession,
-      previousPlayback: PlaybackSnapshot | undefined,
-      nextPlayback: PlaybackSnapshot,
-      reason: ContentOutboundMessage["reason"],
-    ) => {
-      if (reason !== "heartbeat") {
-        return true;
-      }
-
-      if (nextPlayback.state !== "playing") {
-        return true;
-      }
-
-      if (previousPlayback?.episodeUrl !== nextPlayback.episodeUrl) {
-        return true;
-      }
-
-      return (
-        !session.lastWatchProgressAt ||
-        Date.now() - session.lastWatchProgressAt >=
-          WATCH_PROGRESS_WRITE_INTERVAL_MS
-      );
-    };
-
-    const queueWatchProgressUpdate = (
-      session: TabSession,
-      playback: PlaybackSnapshot,
-      previousPlayback: PlaybackSnapshot | undefined,
-      reason: ContentOutboundMessage["reason"],
-    ) => {
-      if (
-        !shouldPersistWatchProgress(session, previousPlayback, playback, reason)
-      ) {
-        return;
-      }
-
-      session.lastWatchProgressAt = Date.now();
-      void upsertWatchProgress(playback).catch((error) => {
-        console.error("Failed to persist watch progress", error);
-      });
-    };
-
-    const handleContentSnapshot = (
-      session: TabSession,
-      message: ContentOutboundMessage,
-      port: Browser.runtime.Port,
-    ) => {
-      const previousPlayback = session.localPlayback;
-      const liveTab = resolveTabContext(session, message, port);
-      const normalizedPlayback = normalizePlaybackSnapshotForTab(
-        message.playback,
-        liveTab.tabUrl,
-        liveTab.tabTitle,
-      );
-
-      session.activeFrameId = port.sender?.frameId ?? 0;
-      session.tabUrl = liveTab.tabUrl ?? session.tabUrl ?? message.tabUrl;
-      session.tabTitle = liveTab.tabTitle ?? session.tabTitle;
-      session.localPlayback = normalizedPlayback;
-      session.roomIdFromUrl = resolveRoomIdForTabContext(
-        session.tabUrl,
-        message.roomIdFromUrl ?? getRoomIdFromUrl(message.tabUrl),
-      );
-
-      if (
-        session.autoJoinSuppressedRoomId &&
-        session.roomIdFromUrl !== session.autoJoinSuppressedRoomId
-      ) {
-        session.autoJoinSuppressedRoomId = undefined;
-      }
-
-      queueWatchProgressUpdate(
-        session,
-        normalizedPlayback,
-        previousPlayback,
-        message.reason,
-      );
-
-      if (
-        session.connectionState === "switching" &&
-        session.roomPlayback &&
-        session.roomPlayback.episodeUrl === normalizedPlayback.episodeUrl
-      ) {
-        session.connectionState = "connected";
-      }
-
-      if (session.socket?.readyState === WebSocket.OPEN && session.roomId) {
-        const nextUpdateType = shouldSendHostUpdate(
-          session,
-          previousPlayback,
-          normalizedPlayback,
-          message.reason,
-        );
-
-        if (nextUpdateType) {
-          sendRoomUpdate(session, nextUpdateType, normalizedPlayback);
-          session.connectionState = "connected";
-          session.lastError = undefined;
-        } else {
-          handleFollowerCorrection(session, normalizedPlayback, message.reason);
-        }
-      } else if (!session.roomId) {
-        session.connectionState = "ready";
-      }
-
-      maybeAutoJoin(session);
-      publishRoomState(session);
-    };
+    const roomConnectionController = createRoomConnectionController({
+      publishRoomState,
+      queuePopupStatePublish: popupStateController.queuePopupStatePublish,
+      postToContent,
+    });
+    const contentMessageController = createContentMessageController({
+      connectSession: roomConnectionController.connectSession,
+      sendRoomUpdate: roomConnectionController.sendRoomUpdate,
+      postToContent,
+      publishRoomState,
+    });
 
     const handlePopupMessage = async (
       message: PopupRequestMessage,
     ): Promise<PopupStateResponse | undefined> => {
       switch (message.type) {
         case "popup:get-active-tab-state":
-          return buildActivePopupState();
+          return popupStateController.buildActivePopupState();
         case "popup:create-room": {
           const session = sessions.get(message.tabId);
           if (session?.localPlayback) {
             session.autoJoinSuppressedRoomId = undefined;
-            await connectSession(session, session.roomId);
+            await roomConnectionController.connectSession(
+              session,
+              session.roomId,
+            );
           }
-          return buildActivePopupState();
+          return popupStateController.buildActivePopupState();
         }
         case "popup:disconnect-room": {
           const session = sessions.get(message.tabId);
           if (session) {
             session.autoJoinSuppressedRoomId =
               session.roomIdFromUrl ?? session.roomId;
-            closeSocket(session, {
+            roomConnectionController.closeSocket(session, {
               clearRoom: true,
               clearIdentity: true,
               suppressReconnect: true,
@@ -949,7 +101,7 @@ export default defineBackground({
             session.lastError = undefined;
             publishRoomState(session);
           }
-          return buildActivePopupState();
+          return popupStateController.buildActivePopupState();
         }
       }
     };
@@ -966,7 +118,7 @@ export default defineBackground({
         console.error("Failed to handle popup message", error);
       }
 
-      return safeBuildActivePopupState();
+      return popupStateController.safeBuildActivePopupState();
     };
 
     browser.runtime.onInstalled.addListener(() => {
@@ -1006,12 +158,15 @@ export default defineBackground({
               continue;
             }
 
-            void connectSession(session, session.roomId);
+            void roomConnectionController.connectSession(
+              session,
+              session.roomId,
+            );
           }
         }
       }
 
-      queuePopupStatePublish();
+      popupStateController.queuePopupStatePublish();
     });
 
     browser.runtime.onMessage.addListener((message: PopupRequestMessage) => {
@@ -1020,13 +175,7 @@ export default defineBackground({
 
     browser.runtime.onConnect.addListener((port) => {
       if (port.name === POPUP_STATE_PORT_NAME) {
-        popupStatePorts.add(port);
-        void safeBuildActivePopupState().then((response) => {
-          postPopupState(port, response);
-        });
-        port.onDisconnect.addListener(() => {
-          popupStatePorts.delete(port);
-        });
+        popupStateController.registerPopupStatePort(port);
         return;
       }
 
@@ -1056,7 +205,7 @@ export default defineBackground({
         return;
       }
 
-      const session = getOrCreateSession(tabId);
+      const session = getOrCreateSession(sessions, tabId);
       session.ports.set(frameId, port);
       session.connectionState =
         session.roomId && session.connectionState !== "switching"
@@ -1073,7 +222,11 @@ export default defineBackground({
       publishRoomState(session);
 
       port.onMessage.addListener((message: ContentOutboundMessage) => {
-        void handleContentSnapshot(session, message, port);
+        void contentMessageController.handleContentSnapshot(
+          session,
+          message,
+          port,
+        );
       });
 
       port.onDisconnect.addListener(() => {
@@ -1092,7 +245,7 @@ export default defineBackground({
               return;
             }
 
-            closeSocket(session, {
+            roomConnectionController.closeSocket(session, {
               clearRoom: true,
               clearIdentity: false,
               suppressReconnect: true,
@@ -1131,21 +284,21 @@ export default defineBackground({
         session.tabTitle = tab.title;
       }
 
-      queuePopupStatePublish();
+      popupStateController.queuePopupStatePublish();
     });
 
     browser.tabs.onActivated.addListener(() => {
-      queuePopupStatePublish();
+      popupStateController.queuePopupStatePublish();
     });
 
     browser.tabs.onRemoved.addListener((tabId) => {
       const session = sessions.get(tabId);
       if (!session) {
-        queuePopupStatePublish();
+        popupStateController.queuePopupStatePublish();
         return;
       }
 
-      closeSocket(session, {
+      roomConnectionController.closeSocket(session, {
         clearRoom: true,
         clearIdentity: false,
         suppressReconnect: true,
@@ -1153,113 +306,7 @@ export default defineBackground({
       });
       sessions.delete(tabId);
       clearActionState(tabId);
-      queuePopupStatePublish();
+      popupStateController.queuePopupStatePublish();
     });
   },
 });
-
-function runActionUpdate(update: Promise<unknown>) {
-  void update.catch((error) => {
-    if (!isIgnorableTabLifecycleError(error)) {
-      console.error("Failed to update extension action state", error);
-    }
-  });
-}
-
-function isIgnorableTabLifecycleError(error: unknown) {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : "";
-
-  return message.includes("No tab with id");
-}
-
-function isIgnorablePortError(error: unknown) {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : "";
-
-  return (
-    message.includes("Extension context invalidated") ||
-    message.includes("disconnected port") ||
-    message.includes("message channel is closed")
-  );
-}
-
-function getActionBadgeText(session: TabSession): string {
-  if (session.connectionState === "connected") {
-    return session.participantCount > 9
-      ? "9+"
-      : `${Math.max(session.participantCount, 1)}`;
-  }
-
-  if (
-    session.connectionState === "connecting" ||
-    session.connectionState === "switching"
-  ) {
-    return "...";
-  }
-
-  if (session.connectionState === "error") {
-    return "!";
-  }
-
-  if (session.localPlayback) {
-    return "ON";
-  }
-
-  return "";
-}
-
-function getActionBadgeColor(session: TabSession): string {
-  if (session.connectionState === "connected") {
-    return "#f97316";
-  }
-
-  if (
-    session.connectionState === "connecting" ||
-    session.connectionState === "switching"
-  ) {
-    return "#f59e0b";
-  }
-
-  if (session.connectionState === "error") {
-    return "#ef4444";
-  }
-
-  return "#22c55e";
-}
-
-function getActionTitle(session: TabSession): string {
-  if (session.connectionState === "connected" && session.roomId) {
-    const role =
-      session.sessionId && session.hostSessionId === session.sessionId
-        ? "host"
-        : "viewer";
-    return `Roll Together: ${role} in ${session.roomId.slice(0, 8)} with ${session.participantCount} viewer${session.participantCount === 1 ? "" : "s"}`;
-  }
-
-  if (session.connectionState === "switching") {
-    return "Roll Together: Switching episode";
-  }
-
-  if (session.connectionState === "connecting") {
-    return "Roll Together: Connecting to room";
-  }
-
-  if (session.connectionState === "error") {
-    return `Roll Together: ${session.lastError ?? "Connection issue"}`;
-  }
-
-  if (session.localPlayback?.episodeTitle) {
-    return `Roll Together: Player detected for ${session.localPlayback.episodeTitle}`;
-  }
-
-  return DEFAULT_ACTION_TITLE;
-}

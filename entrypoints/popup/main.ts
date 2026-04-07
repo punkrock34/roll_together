@@ -1036,7 +1036,9 @@ function bindEvents(view: PopupViewModel) {
   app
     .querySelector<HTMLButtonElement>("[data-action='open-options']")
     ?.addEventListener("click", async () => {
-      await browser.runtime.openOptionsPage();
+      await browser.tabs.create({
+        url: browser.runtime.getURL("/options.html"),
+      });
     });
 
   app

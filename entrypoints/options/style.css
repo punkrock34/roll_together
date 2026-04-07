@@ -1,9 +1,23 @@
 @import "../../src/ui/theme.css";
 
+#app,
+body {
+  width: 100%;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+#app {
+  min-height: 100%;
+}
+
 main {
+  width: min(100%, 980px);
   max-width: 980px;
   margin: 0 auto;
-  padding: 32px 20px 56px;
+  padding: 24px clamp(16px, 3vw, 28px) 56px;
   display: grid;
   gap: 18px;
 }
@@ -28,6 +42,7 @@ main {
 .field-grid {
   display: grid;
   gap: 18px;
+  min-width: 0;
 }
 
 .overview-grid {
@@ -66,6 +81,13 @@ main {
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+}
+
+.section-head > div,
+.room-item-head > div,
+.room-item,
+.list li {
+  min-width: 0;
 }
 
 label {
@@ -146,6 +168,11 @@ button {
   border: 1px solid var(--rt-border);
 }
 
+.list li {
+  display: grid;
+  gap: 8px;
+}
+
 .room-pill {
   border-radius: 999px;
   padding: 7px 10px;
@@ -153,12 +180,18 @@ button {
   font-weight: 700;
   background: var(--rt-accent-soft);
   color: var(--rt-accent-strong);
+  max-width: 100%;
 }
 
 .clamp {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.room-item strong,
+.list li strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .hint-list {
@@ -175,5 +208,26 @@ button {
   .history-grid,
   .field-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  main {
+    padding-top: 20px;
+    gap: 16px;
+  }
+
+  .card {
+    padding: 18px;
+    border-radius: 20px;
+  }
+
+  .metric-card {
+    min-height: 0;
+  }
+
+  .section-head,
+  .room-item-head {
+    flex-direction: column;
   }
 }

@@ -11,7 +11,7 @@ export default defineConfig({
     short_name: "Roll Together",
     description:
       "Anonymous Crunchyroll watch parties with local-first progress and a self-hosted backend.",
-    version: "4.3.3",
+    version: "4.3.4",
     permissions: ["storage", "tabs"],
     host_permissions: crunchyrollMatches,
     minimum_chrome_version: "116",
@@ -34,10 +34,14 @@ export default defineConfig({
       default_title: "Roll Together v2",
       default_popup: "popup.html",
     },
-    options_ui: {
-      page: "options.html",
-      open_in_tab: true,
-    },
+    options_page: browser === "firefox" ? undefined : "options.html",
+    options_ui:
+      browser === "firefox"
+        ? {
+            page: "options.html",
+            open_in_tab: true,
+          }
+        : undefined,
     icons: {
       "16": "images/get_started16.png",
       "32": "images/get_started32.png",

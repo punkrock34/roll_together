@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildSyncDecision, needsPlaybackCorrection } from "./reconcile";
+import {
+  buildSyncDecision,
+  needsPlaybackCorrection,
+  shouldAcceptRoomPlaybackUpdate,
+} from "./reconcile";
 import type { PlaybackSnapshot } from "./protocol";
 
 const basePlayback: PlaybackSnapshot = {
@@ -60,5 +64,78 @@ describe("buildSyncDecision", () => {
         currentTime: 13.5,
       }),
     ).toBe(false);
+  });
+
+  it("requests a seek when the remote room switches episodes", () => {
+    const decision = buildSyncDecision(basePlayback, {
+      ...basePlayback,
+      episodeUrl: "https://www.crunchyroll.com/watch/example-2",
+      episodeTitle: "Example Episode 2",
+      currentTime: 0,
+    });
+
+    expect(decision.shouldSeek).toBe(true);
+    expect(decision.targetTime).toBe(0);
+  });
+});
+
+describe("shouldAcceptRoomPlaybackUpdate", () => {
+  it("accepts playback when no room playback is known yet", () => {
+    expect(shouldAcceptRoomPlaybackUpdate(undefined, basePlayback)).toBe(true);
+  });
+
+  it("accepts a newer same-episode sync", () => {
+    expect(
+      shouldAcceptRoomPlaybackUpdate(basePlayback, {
+        ...basePlayback,
+        currentTime: 24,
+        updatedAt: 2,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an older same-episode sync", () => {
+    expect(
+      shouldAcceptRoomPlaybackUpdate(
+        {
+          ...basePlayback,
+          currentTime: 24,
+          updatedAt: 3,
+        },
+        {
+          ...basePlayback,
+          currentTime: 18,
+          updatedAt: 2,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects an older cross-episode navigate", () => {
+    expect(
+      shouldAcceptRoomPlaybackUpdate(
+        {
+          ...basePlayback,
+          episodeUrl: "https://www.crunchyroll.com/watch/example-2",
+          episodeTitle: "Example Episode 2",
+          updatedAt: 10,
+        },
+        {
+          ...basePlayback,
+          updatedAt: 9,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts a newer cross-episode navigate", () => {
+    expect(
+      shouldAcceptRoomPlaybackUpdate(basePlayback, {
+        ...basePlayback,
+        episodeUrl: "https://www.crunchyroll.com/watch/example-2",
+        episodeTitle: "Example Episode 2",
+        updatedAt: 10,
+      }),
+    ).toBe(true);
   });
 });

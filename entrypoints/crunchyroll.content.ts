@@ -13,6 +13,11 @@ import {
   extractEpisodeInfo,
   findCrunchyrollPlayer,
 } from "../src/providers/crunchyroll/player";
+import {
+  consumeRemoteEchoExpectation,
+  createRemoteEchoExpectation,
+  type RemoteEchoExpectation,
+} from "../src/providers/crunchyroll/remote-echo";
 
 export default defineContentScript({
   matches: ["*://crunchyroll.com/*", "*://*.crunchyroll.com/*"],
@@ -28,7 +33,6 @@ export default defineContentScript({
 
     let player: HTMLVideoElement | null = null;
     let disposePlayerListeners: (() => void) | undefined;
-    let ignoreLocalEventsUntil = 0;
     let scanQueued = false;
     let scanBurstTimeoutIds: number[] = [];
     let lastPageKey = `${window.location.href}|${document.title}`;
@@ -37,6 +41,7 @@ export default defineContentScript({
     let pendingRemoteRetryTimeoutId: number | undefined;
     let pendingRemoteRetryCount = 0;
     let playPromise: Promise<void> | undefined;
+    let expectedRemoteEcho: RemoteEchoExpectation | undefined;
 
     const clearPendingRemoteRetry = () => {
       if (pendingRemoteRetryTimeoutId) {
@@ -109,12 +114,10 @@ export default defineContentScript({
       };
     };
 
-    const postSnapshot = (reason: ContentSnapshotReason) => {
-      const snapshot = buildSnapshot();
-      if (!snapshot) {
-        return;
-      }
-
+    const sendSnapshot = (
+      snapshot: PlaybackSnapshot,
+      reason: ContentSnapshotReason,
+    ) => {
       const message: ContentOutboundMessage = {
         type: "content:snapshot",
         tabUrl: window.location.href,
@@ -127,12 +130,31 @@ export default defineContentScript({
       port.postMessage(message);
     };
 
-    const handleLocalChange = () => {
-      if (Date.now() < ignoreLocalEventsUntil) {
+    const postSnapshot = (
+      reason: ContentSnapshotReason,
+      options?: { suppressRemoteEcho: boolean },
+    ) => {
+      const snapshot = buildSnapshot();
+      if (!snapshot) {
         return;
       }
 
-      postSnapshot("interaction");
+      if (options?.suppressRemoteEcho) {
+        const echoResult = consumeRemoteEchoExpectation(
+          expectedRemoteEcho,
+          snapshot,
+        );
+        expectedRemoteEcho = echoResult.nextExpectation;
+        if (echoResult.shouldSuppress) {
+          return;
+        }
+      }
+
+      sendSnapshot(snapshot, reason);
+    };
+
+    const handleLocalChange = () => {
+      postSnapshot("interaction", { suppressRemoteEcho: true });
     };
 
     const applyRemotePlayback = (
@@ -158,10 +180,14 @@ export default defineContentScript({
         !decision.shouldSeek
       ) {
         clearPendingRemotePlayback();
+        expectedRemoteEcho = undefined;
         return;
       }
 
-      ignoreLocalEventsUntil = Date.now() + 500;
+      expectedRemoteEcho = createRemoteEchoExpectation(
+        message.playback,
+        decision,
+      );
 
       if (decision.shouldSeek) {
         player.currentTime = decision.targetTime;
@@ -209,6 +235,7 @@ export default defineContentScript({
       disposePlayerListeners = undefined;
       player = null;
       lastObservedCurrentTime = undefined;
+      expectedRemoteEcho = undefined;
     };
 
     const attachPlayer = (candidate: HTMLVideoElement) => {
@@ -256,7 +283,7 @@ export default defineContentScript({
           Math.abs(currentTime - lastObservedCurrentTime) >
             TIME_JUMP_THRESHOLD_SECONDS
         ) {
-          postSnapshot("interaction");
+          postSnapshot("interaction", { suppressRemoteEcho: true });
         }
 
         lastObservedCurrentTime = currentTime;
@@ -392,6 +419,7 @@ export default defineContentScript({
       detachPlayer();
       clearPendingRemotePlayback();
       clearScanBurst();
+      expectedRemoteEcho = undefined;
       if (pageKeyPollIntervalId) {
         window.clearInterval(pageKeyPollIntervalId);
       }
