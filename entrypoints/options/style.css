@@ -63,6 +63,11 @@ main {
   color: var(--rt-muted);
 }
 
+.stack {
+  display: grid;
+  gap: 12px;
+}
+
 .eyebrow {
   font-size: 12px;
   text-transform: uppercase;

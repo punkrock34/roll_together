@@ -1,0 +1,170 @@
+@import "../../src/ui/theme.css";
+
+html,
+body,
+#app {
+  min-height: 100%;
+  width: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgb(255 138 30 / 0.12), transparent 38%),
+    var(--rt-bg);
+  color: var(--rt-text);
+}
+
+#app {
+  min-height: 100%;
+}
+
+main {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  padding: 28px clamp(16px, 3vw, 28px) 56px;
+  display: grid;
+  gap: 18px;
+}
+
+.card {
+  background: var(--rt-panel);
+  border: 1px solid var(--rt-border);
+  border-radius: 24px;
+  box-shadow: var(--rt-shadow);
+  padding: 22px;
+  display: grid;
+  gap: 16px;
+}
+
+.card-subtle,
+.hero-card {
+  background: linear-gradient(
+    180deg,
+    var(--rt-panel) 0%,
+    var(--rt-panel-strong) 100%
+  );
+}
+
+.eyebrow,
+.muted {
+  color: var(--rt-muted);
+}
+
+.eyebrow {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stack {
+  display: grid;
+  gap: 8px;
+}
+
+.card h1,
+.card h2,
+.card h3,
+.card p,
+.card pre,
+.card ol {
+  margin: 0;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.choice-grid,
+.code-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.choice-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.code-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 14px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.primary {
+  background: var(--rt-accent);
+  color: #1e1309;
+}
+
+.secondary {
+  background: var(--rt-panel-strong);
+  color: var(--rt-text);
+}
+
+.choice-card,
+.code-card {
+  min-width: 0;
+}
+
+.hint-list,
+.step-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.hint-list {
+  color: var(--rt-muted);
+}
+
+pre {
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--rt-input);
+  border: 1px solid var(--rt-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}
+
+@media (max-width: 900px) {
+  .choice-grid,
+  .code-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  main {
+    padding-top: 20px;
+    gap: 16px;
+  }
+
+  .card {
+    padding: 18px;
+    border-radius: 20px;
+  }
+
+  .section-head {
+    flex-direction: column;
+  }
+}

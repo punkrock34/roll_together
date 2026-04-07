@@ -271,16 +271,34 @@ async function render(
   ]);
 
   const helpCard = createElement("section", { className: "card card-subtle" });
+  const helpCopy = createElement("div", { className: "stack" });
+  appendChildren(helpCopy, [
+    createElement("p", {
+      className: "muted",
+      text: "Pick the hosting path that matches how often you plan to watch with others.",
+    }),
+    createHintList([
+      "Small VPS: easiest stable choice if you host often and want a clean setup for friends.",
+      "Spare laptop, Raspberry Pi, or mini PC: cheapest long-term option if you already own the hardware.",
+      "Current PC: fine for occasional sessions, but you must start the backend every time and keep the machine awake.",
+      "Use https://your-domain and wss://your-domain/ws for a normal HTTPS setup. If you are hosting at home, a Dynamic DNS hostname can also work.",
+    ]),
+  ]);
+  const helpActions = createElement("div", { className: "actions" });
+  appendChildren(helpActions, [
+    createButton(
+      "Open Self-Hosting Guide",
+      "secondary",
+      "openSelfHostingGuide",
+    ),
+  ]);
   appendChildren(helpCard, [
     createSectionHead(
-      "Setup Notes",
-      "A few quick reminders that make self-hosted setup less painful.",
+      "Self-Hosting Help",
+      "Beginner-friendly setup guidance without leaving the extension.",
     ),
-    createHintList([
-      "Use https://your-domain and wss://your-domain/ws when you place the backend behind a reverse proxy.",
-      "The popup can change backend URLs too, but this page is better for full maintenance.",
-      "Saved rooms and watched progress live only in this browser profile.",
-    ]),
+    helpCopy,
+    helpActions,
   ]);
 
   const roomsCard = createElement("section", { className: "card" });
@@ -359,6 +377,14 @@ function bindEvents() {
       const nextTheme = (event.currentTarget as HTMLSelectElement)
         .value as ThemeMode;
       applyThemeMode(nextTheme);
+    });
+
+  app
+    ?.querySelector<HTMLButtonElement>("#openSelfHostingGuide")
+    ?.addEventListener("click", async () => {
+      await browser.tabs.create({
+        url: browser.runtime.getURL("/self-hosting.html"),
+      });
     });
 
   app
