@@ -58,10 +58,17 @@ export interface PopupDisconnectRoomMessage {
   tabId: number;
 }
 
+export interface PopupTransferHostMessage {
+  type: "popup:transfer-host";
+  tabId: number;
+  targetSessionId: string;
+}
+
 export type PopupRequestMessage =
   | PopupGetStateMessage
   | PopupCreateRoomMessage
-  | PopupDisconnectRoomMessage;
+  | PopupDisconnectRoomMessage
+  | PopupTransferHostMessage;
 
 export interface PopupStateResponse {
   activeTabId?: number;

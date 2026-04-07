@@ -1,9 +1,13 @@
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const ROOM_QUERY_PARAM = "rollTogetherRoom";
 
 export type ProviderName = "crunchyroll";
 export type PlaybackState = "playing" | "paused";
-export type RoomMutationErrorCode = "unknown_room" | "not_joined" | "not_host";
+export type RoomMutationErrorCode =
+  | "unknown_room"
+  | "not_joined"
+  | "not_host"
+  | "invalid_transfer_target";
 
 export interface EpisodeInfo {
   provider: ProviderName;
@@ -54,6 +58,12 @@ export interface LeaveMessage {
   version: number;
 }
 
+export interface TransferHostMessage {
+  type: "transfer_host";
+  version: number;
+  targetSessionId: string;
+}
+
 export interface PingMessage {
   type: "ping";
   version: number;
@@ -65,6 +75,7 @@ export type ClientMessage =
   | SyncMessage
   | NavigateMessage
   | LeaveMessage
+  | TransferHostMessage
   | PingMessage;
 
 interface RoomSnapshotMessageBase {
@@ -94,6 +105,12 @@ export interface NavigateBroadcastMessage extends RoomBroadcastMessageBase {
   type: "navigate";
 }
 
+export interface HostTransferredMessage extends RoomSnapshotMessageBase {
+  type: "host_transferred";
+  version: number;
+  previousHostSessionId: string;
+}
+
 export interface PresenceMessage {
   type: "presence";
   version: number;
@@ -121,6 +138,7 @@ export type ServerMessage =
   | JoinedMessage
   | SyncBroadcastMessage
   | NavigateBroadcastMessage
+  | HostTransferredMessage
   | PresenceMessage
   | PongMessage
   | ErrorMessage;
@@ -131,6 +149,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isPlaybackState(value: unknown): value is PlaybackState {
   return value === "playing" || value === "paused";
+}
+
+function isCurrentProtocolVersion(value: unknown) {
+  return value === PROTOCOL_VERSION;
 }
 
 export function isPlaybackSnapshot(value: unknown): value is PlaybackSnapshot {
@@ -163,6 +185,10 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     return null;
   }
 
+  if (!isCurrentProtocolVersion(parsed.version)) {
+    return null;
+  }
+
   switch (parsed.type) {
     case "joined":
       return isPlaybackSnapshot(parsed.playback) &&
@@ -190,6 +216,15 @@ export function parseServerMessage(raw: string): ServerMessage | null {
         Array.isArray(parsed.participants) &&
         typeof parsed.hostSessionId === "string"
         ? (parsed as unknown as NavigateBroadcastMessage)
+        : null;
+    case "host_transferred":
+      return isPlaybackSnapshot(parsed.playback) &&
+        typeof parsed.roomId === "string" &&
+        typeof parsed.participantCount === "number" &&
+        Array.isArray(parsed.participants) &&
+        typeof parsed.hostSessionId === "string" &&
+        typeof parsed.previousHostSessionId === "string"
+        ? (parsed as unknown as HostTransferredMessage)
         : null;
     case "presence":
       return typeof parsed.roomId === "string" &&

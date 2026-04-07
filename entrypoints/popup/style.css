@@ -322,6 +322,13 @@ button:disabled {
   background: var(--rt-panel-strong);
 }
 
+.participant-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .participant-host {
   background: rgba(255, 122, 26, 0.14);
   color: var(--rt-accent-strong);

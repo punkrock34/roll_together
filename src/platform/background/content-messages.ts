@@ -4,6 +4,7 @@ import type {
   ApplyRemotePlaybackMessage,
   ContentOutboundMessage,
 } from "../../core/messages";
+import { consumePendingHostTakeoverPlayback } from "../../core/host-transfer";
 import type { PlaybackSnapshot } from "../../core/protocol";
 import {
   arePlaybackSnapshotsSimilar,
@@ -52,6 +53,10 @@ export function createContentMessageController({
     reason: ContentOutboundMessage["reason"],
   ): "sync" | "navigate" | undefined => {
     if (!session.roomId || !session.sessionId || !session.hostSessionId) {
+      return undefined;
+    }
+
+    if (session.pendingHostTakeoverPlayback) {
       return undefined;
     }
 
@@ -250,19 +255,27 @@ export function createContentMessageController({
     }
 
     if (session.socket?.readyState === WebSocket.OPEN && session.roomId) {
-      const nextUpdateType = shouldSendHostUpdate(
-        session,
-        previousPlayback,
+      const takeoverState = consumePendingHostTakeoverPlayback(
+        session.pendingHostTakeoverPlayback,
         normalizedPlayback,
-        message.reason,
       );
+      session.pendingHostTakeoverPlayback = takeoverState.pendingPlayback;
 
-      if (nextUpdateType) {
-        sendRoomUpdate(session, nextUpdateType, normalizedPlayback);
-        session.connectionState = "connected";
-        session.lastError = undefined;
-      } else {
-        handleFollowerCorrection(session, normalizedPlayback, message.reason);
+      if (!takeoverState.blocked) {
+        const nextUpdateType = shouldSendHostUpdate(
+          session,
+          previousPlayback,
+          normalizedPlayback,
+          message.reason,
+        );
+
+        if (nextUpdateType) {
+          sendRoomUpdate(session, nextUpdateType, normalizedPlayback);
+          session.connectionState = "connected";
+          session.lastError = undefined;
+        } else if (session.hostSessionId !== session.sessionId) {
+          handleFollowerCorrection(session, normalizedPlayback, message.reason);
+        }
       }
     } else if (!session.roomId) {
       session.connectionState = "ready";

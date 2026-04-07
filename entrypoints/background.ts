@@ -103,6 +103,21 @@ export default defineBackground({
           }
           return popupStateController.buildActivePopupState();
         }
+        case "popup:transfer-host": {
+          const session = sessions.get(message.tabId);
+          if (session) {
+            const sent = roomConnectionController.transferRoomHost(
+              session,
+              message.targetSessionId,
+            );
+            if (!sent) {
+              session.lastError =
+                "Reconnect to the room before transferring host control.";
+              publishRoomState(session);
+            }
+          }
+          return popupStateController.buildActivePopupState();
+        }
       }
     };
 

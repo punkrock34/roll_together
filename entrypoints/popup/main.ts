@@ -5,6 +5,7 @@ import {
   POPUP_PORT_NAME,
   POPUP_STATE_PORT_NAME,
 } from "../../src/core/messages";
+import { canTransferHostToParticipant } from "../../src/core/host-transfer";
 import {
   DEFAULT_SETTINGS,
   deleteRecentRoom,
@@ -568,7 +569,27 @@ function createParticipantsPanel(view: PopupViewModel) {
       text: participant.isHost ? "Host" : "In room",
     });
 
-    appendChildren(item, [copy, badge]);
+    const controls = createElement("div", {
+      className: "participant-controls",
+    });
+    controls.appendChild(badge);
+
+    if (
+      canTransferHostToParticipant(
+        popupState.sessionId,
+        popupState.isHost,
+        participant,
+      )
+    ) {
+      const transferButton = createButton("Make Host", "secondary");
+      transferButton.dataset.action = "transfer-host";
+      transferButton.dataset.targetSessionId = participant.sessionId;
+      transferButton.dataset.targetDisplayName =
+        participant.displayName?.trim() || "this viewer";
+      controls.appendChild(transferButton);
+    }
+
+    appendChildren(item, [copy, controls]);
     list.appendChild(item);
   }
 
@@ -1006,6 +1027,40 @@ function bindEvents(view: PopupViewModel) {
       }
       uiState.notice = "Left the room.";
       await render();
+    });
+
+  app
+    .querySelectorAll<HTMLButtonElement>("[data-action='transfer-host']")
+    .forEach((button) => {
+      button.addEventListener("click", async () => {
+        const targetSessionId = button.dataset.targetSessionId;
+        const targetDisplayName =
+          button.dataset.targetDisplayName ?? "this viewer";
+        const activeTabId =
+          view.popupState.activeTabId ?? (await getActiveTab())?.id;
+
+        if (!targetSessionId || !activeTabId) {
+          return;
+        }
+
+        const confirmed = window.confirm(
+          `Transfer host control to ${targetDisplayName}?`,
+        );
+        if (!confirmed) {
+          return;
+        }
+
+        const nextState = await sendPopupMessage<PopupStateResponse>({
+          type: "popup:transfer-host",
+          tabId: activeTabId,
+          targetSessionId,
+        });
+        if (nextState) {
+          livePopupState = nextState;
+        }
+        uiState.notice = "Host transfer requested.";
+        await render();
+      });
     });
 
   app

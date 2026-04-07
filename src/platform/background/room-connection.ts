@@ -1,6 +1,7 @@
 import { browser } from "wxt/browser";
 
 import type { ApplyRemotePlaybackMessage } from "../../core/messages";
+import { shouldWaitForHostTakeoverAlignment } from "../../core/host-transfer";
 import {
   PROTOCOL_VERSION,
   parseServerMessage,
@@ -8,6 +9,7 @@ import {
   type PingMessage,
   type PlaybackSnapshot,
   type ServerMessage,
+  type TransferHostMessage,
 } from "../../core/protocol";
 import { getSettings, upsertRecentRoom } from "../../core/storage";
 import {
@@ -82,6 +84,7 @@ export function createRoomConnectionController({
     if (options.clearRoom) {
       session.roomId = undefined;
       session.hostSessionId = undefined;
+      session.pendingHostTakeoverPlayback = undefined;
       session.roomPlayback = undefined;
       session.participantCount = 1;
       session.participants = [];
@@ -154,6 +157,21 @@ export function createRoomConnectionController({
     session.lastOutboundAt = Date.now();
   };
 
+  const transferRoomHost = (session: TabSession, targetSessionId: string) => {
+    if (!session.socket || session.socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    const payload: TransferHostMessage = {
+      type: "transfer_host",
+      version: PROTOCOL_VERSION,
+      targetSessionId,
+    };
+
+    session.socket.send(JSON.stringify(payload));
+    return true;
+  };
+
   const scheduleReconnect = (session: TabSession, roomId: string) => {
     stopReconnect(session);
     const delayMs =
@@ -176,6 +194,7 @@ export function createRoomConnectionController({
         session.roomId = message.roomId;
         session.sessionId = message.sessionId;
         session.hostSessionId = message.hostSessionId;
+        session.pendingHostTakeoverPlayback = undefined;
         session.participantCount = message.participantCount;
         session.participants = message.participants;
         session.lastError = undefined;
@@ -219,6 +238,9 @@ export function createRoomConnectionController({
         session.participantCount = message.participantCount;
         session.participants = message.participants;
         session.hostSessionId = message.hostSessionId;
+        if (session.sessionId !== message.hostSessionId) {
+          session.pendingHostTakeoverPlayback = undefined;
+        }
         session.lastError = undefined;
 
         if (
@@ -242,6 +264,9 @@ export function createRoomConnectionController({
         session.participantCount = message.participantCount;
         session.participants = message.participants;
         session.hostSessionId = message.hostSessionId;
+        if (session.sessionId !== message.hostSessionId) {
+          session.pendingHostTakeoverPlayback = undefined;
+        }
         session.lastError = undefined;
 
         if (
@@ -294,10 +319,47 @@ export function createRoomConnectionController({
         publishRoomState(session);
         break;
       }
+      case "host_transferred": {
+        session.connectionState = "connected";
+        session.roomId = message.roomId;
+        session.participantCount = message.participantCount;
+        session.participants = message.participants;
+        session.hostSessionId = message.hostSessionId;
+        session.lastError = undefined;
+        session.roomPlayback = message.playback;
+
+        const becameHost =
+          Boolean(session.sessionId) &&
+          session.sessionId === message.hostSessionId &&
+          session.sessionId !== message.previousHostSessionId;
+
+        session.pendingHostTakeoverPlayback =
+          becameHost &&
+          shouldWaitForHostTakeoverAlignment(
+            session.localPlayback,
+            message.playback,
+          )
+            ? message.playback
+            : undefined;
+
+        applyRoomPlaybackIfNeeded(
+          session,
+          message.playback,
+          message.roomId,
+          message.participantCount,
+          message.hostSessionId,
+        );
+
+        publishRoomState(session);
+        break;
+      }
       case "presence":
         session.participantCount = message.participantCount;
         session.participants = message.participants;
         session.hostSessionId = message.hostSessionId;
+        if (session.sessionId !== message.hostSessionId) {
+          session.pendingHostTakeoverPlayback = undefined;
+        }
         if (session.roomId) {
           session.connectionState =
             session.connectionState === "switching" ? "switching" : "connected";
@@ -321,6 +383,12 @@ export function createRoomConnectionController({
             hostSessionId: session.hostSessionId ?? "",
             playback: session.roomPlayback,
           });
+        } else if (
+          message.code === "invalid_transfer_target" &&
+          session.roomId
+        ) {
+          session.connectionState = "connected";
+          session.lastError = message.message;
         } else {
           session.connectionState = "error";
           session.lastError = message.message;
@@ -440,5 +508,6 @@ export function createRoomConnectionController({
     closeSocket,
     connectSession,
     sendRoomUpdate,
+    transferRoomHost,
   };
 }

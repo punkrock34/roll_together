@@ -72,11 +72,11 @@ Roll Together does not download and execute remote JavaScript or Wasm. Backend c
 
 Recommended disclosures to select:
 
-- `Date cu caracter personal`
+- `Personally identifiable information`
   - because the extension stores and can transmit a user-chosen display name for room presence
-- `Istoric web`
+- `Web browsing activity`
   - because the extension reads the supported episode URL and domain to join, reconnect, and sync rooms
-- `Conținutul site-ului`
+- `Website content`
   - because the extension reads the current episode title and player state needed for sync
 
 Usually do not select categories such as payments, health, authentication, location, or personal communications for the current extension behavior.

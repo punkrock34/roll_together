@@ -18,6 +18,7 @@ export interface TabSession {
   roomId?: string;
   sessionId?: string;
   hostSessionId?: string;
+  pendingHostTakeoverPlayback?: PlaybackSnapshot;
   participantCount: number;
   participants: ParticipantPresence[];
   connectionState: RoomConnectionStatus;
