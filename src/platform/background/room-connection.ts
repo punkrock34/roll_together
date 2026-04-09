@@ -25,6 +25,7 @@ import {
   buildSyncDecision,
   needsPlaybackCorrection,
 } from "../../core/reconcile";
+import { normalizeBackendWsUrl } from "../../core/network-url";
 import { buildRoomInviteUrl } from "../../core/url";
 
 import { getActivePort, type TabSession } from "./session-state";
@@ -169,7 +170,7 @@ interface SocketWithReconnectFlag extends Socket {
 }
 
 function resolveSocketEndpoint(backendWsUrl: string) {
-  const parsed = new URL(backendWsUrl);
+  const parsed = new URL(normalizeBackendWsUrl(backendWsUrl));
   const protocol =
     parsed.protocol === "wss:"
       ? "https:"

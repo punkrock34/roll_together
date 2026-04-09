@@ -17,6 +17,7 @@ import {
   type ThemeMode,
 } from "../../src/core/storage";
 import { testBackendConnection } from "../../src/core/backend-test";
+import { normalizeBackendWsUrl } from "../../src/core/network-url";
 import type {
   PopupRequestMessage,
   PopupStateResponse,
@@ -457,6 +458,7 @@ function normalizePopupState(
     lastError: state.lastError,
     isHost: Boolean(state.isHost),
     controlMode:
+      state.controlMode === "host_only" ||
       state.controlMode === "shared_playback"
         ? state.controlMode
         : "shared_playback",
@@ -676,6 +678,7 @@ function createHomePanel(view: PopupViewModel) {
     const modeSelect = createElement("select", {
       id: "room-control-mode",
     }) as HTMLSelectElement;
+    modeSelect.classList.add("mode-select");
     for (const mode of ["host_only", "shared_playback"] as RoomControlMode[]) {
       const option = createElement("option", {
         text: ROOM_CONTROL_MODE_LABELS[mode],
@@ -686,12 +689,35 @@ function createHomePanel(view: PopupViewModel) {
     }
 
     const wrapper = createElement("div", { className: "mode-control" });
-    const modeField = createField("Room Control Mode", modeSelect);
-    modeField.classList.add("mode-select-field");
+    const head = createElement("div", { className: "mode-control-head" });
+    appendChildren(head, [
+      createElement("span", {
+        className: "mode-control-label",
+        text: "Room Control Mode",
+      }),
+      createElement("span", {
+        className: "mode-control-current",
+        text: ROOM_CONTROL_MODE_LABELS[popupState.controlMode],
+      }),
+    ]);
+
+    const row = createElement("div", { className: "mode-control-row" });
+    const selectShell = createElement("div", {
+      className: "mode-select-shell",
+    });
+    appendChildren(selectShell, [
+      modeSelect,
+      createElement("span", {
+        className: "mode-select-chevron",
+        text: "▾",
+      }),
+    ]);
+
     const applyButton = createButton("Apply", "secondary mode-apply-button", {
       action: "set-room-control-mode",
     });
-    appendChildren(wrapper, [modeField, applyButton]);
+    appendChildren(row, [selectShell, applyButton]);
+    appendChildren(wrapper, [head, row]);
     modeControlField = wrapper;
   }
 
@@ -942,7 +968,7 @@ function createSettingsPanel(view: PopupViewModel) {
   const connectionStatus = createElement("p", {
     className: "connection-status",
     id: "settings-connection-status",
-    text: "Use Test Connection to check the current HTTP and WebSocket URLs before saving.",
+    text: "Use Test Connection before saving. Public hosts should use wss://.../ws (ws:// is for localhost/LAN dev).",
   });
 
   appendChildren(panel, [
@@ -1017,9 +1043,10 @@ function bindEvents(view: PopupViewModel) {
         app
           .querySelector<HTMLInputElement>("#settings-http-url")
           ?.value.trim() ?? DEFAULT_SETTINGS.backendHttpUrl,
-      backendWsUrl:
+      backendWsUrl: normalizeBackendWsUrl(
         app.querySelector<HTMLInputElement>("#settings-ws-url")?.value.trim() ??
-        DEFAULT_SETTINGS.backendWsUrl,
+          DEFAULT_SETTINGS.backendWsUrl,
+      ),
     };
   };
 
@@ -1177,10 +1204,11 @@ function bindEvents(view: PopupViewModel) {
           app
             .querySelector<HTMLInputElement>("#settings-http-url")
             ?.value.trim() ?? DEFAULT_SETTINGS.backendHttpUrl,
-        backendWsUrl:
+        backendWsUrl: normalizeBackendWsUrl(
           app
             .querySelector<HTMLInputElement>("#settings-ws-url")
             ?.value.trim() ?? DEFAULT_SETTINGS.backendWsUrl,
+        ),
         themeMode:
           (app.querySelector<HTMLSelectElement>("#settings-theme-mode")
             ?.value as ThemeMode | undefined) ?? DEFAULT_SETTINGS.themeMode,

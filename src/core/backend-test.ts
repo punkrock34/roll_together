@@ -1,5 +1,7 @@
 import { io, type Socket } from "socket.io-client";
 
+import { isRemotePlainWsUrl, normalizeBackendWsUrl } from "./network-url";
+
 export interface BackendProbeResult {
   ok: boolean;
   message: string;
@@ -182,7 +184,8 @@ function probeSocketIo(
     }, timeoutMs);
 
     try {
-      const endpoint = resolveSocketEndpoint(backendWsUrl);
+      const normalizedWsUrl = normalizeBackendWsUrl(backendWsUrl);
+      const endpoint = resolveSocketEndpoint(normalizedWsUrl);
       socket = io(endpoint.baseUrl, {
         path: endpoint.path,
         transports: ["websocket"],
@@ -204,10 +207,18 @@ function probeSocketIo(
       });
     });
 
-    socket.on("connect_error", () => {
+    socket.on("connect_error", (error: { message?: string } | undefined) => {
+      const errorDetail =
+        typeof error?.message === "string" && error.message.trim().length > 0
+          ? ` (${error.message.trim()})`
+          : "";
+      const hint = isRemotePlainWsUrl(backendWsUrl)
+        ? " Use wss:// for public HTTPS hosts (for example behind Cloudflare)."
+        : "";
+
       finish({
         ok: false,
-        message: "Socket.IO connection failed.",
+        message: `Socket.IO connection failed${errorDetail}.${hint}`,
       });
     });
   });

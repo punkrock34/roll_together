@@ -15,6 +15,7 @@ import {
   type ThemeMode,
 } from "../../src/core/storage";
 import { testBackendConnection } from "../../src/core/backend-test";
+import { normalizeBackendWsUrl } from "../../src/core/network-url";
 import { applyThemeMode } from "../../src/ui/theme";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -266,7 +267,7 @@ async function render(
   const connectionStatus = createElement("p", {
     className: "connection-status",
     id: "connectionStatus",
-    text: "Use Test Connection to check the current HTTP and WebSocket URLs before saving.",
+    text: "Use Test Connection before saving. Public hosts should use wss://.../ws (ws:// is for localhost/LAN dev).",
   });
   appendChildren(connectionCard, [
     createSectionHead(
@@ -290,6 +291,7 @@ async function render(
       "Spare laptop, Raspberry Pi, or mini PC: cheapest long-term option if you already own the hardware.",
       "Current PC: fine for occasional sessions, but you must start the backend every time and keep the machine awake.",
       "Use https://your-domain and wss://your-domain/ws for a normal HTTPS setup. If you are hosting at home, a Dynamic DNS hostname can also work.",
+      "Remote ws:// URLs are auto-upgraded to wss:// when you save settings.",
     ]),
   ]);
   const helpActions = createElement("div", { className: "actions" });
@@ -398,9 +400,10 @@ function bindEvents() {
       backendHttpUrl:
         app?.querySelector<HTMLInputElement>("#httpUrl")?.value.trim() ??
         DEFAULT_SETTINGS.backendHttpUrl,
-      backendWsUrl:
+      backendWsUrl: normalizeBackendWsUrl(
         app?.querySelector<HTMLInputElement>("#wsUrl")?.value.trim() ??
-        DEFAULT_SETTINGS.backendWsUrl,
+          DEFAULT_SETTINGS.backendWsUrl,
+      ),
     };
   };
 

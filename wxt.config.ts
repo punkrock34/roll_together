@@ -11,7 +11,7 @@ export default defineConfig({
     short_name: "Roll Together",
     description:
       "Anonymous Crunchyroll watch parties with local-first progress and a self-hosted backend.",
-    version: "5.0.0",
+    version: "5.1.0",
     // Keep provider-scoped upfront permissions so page-context integration works
     // immediately on supported Crunchyroll pages.
     permissions: ["storage", "tabs"],

@@ -1,5 +1,6 @@
 import { browser } from "wxt/browser";
 
+import { normalizeBackendWsUrl } from "./network-url";
 import type { ProviderName } from "./protocol";
 import type { PlaybackSnapshot } from "./protocol";
 import { toWatchProgressEntry } from "./watch-progress";
@@ -41,8 +42,9 @@ interface ExtensionLocalState {
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   backendHttpUrl:
     import.meta.env.WXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:3000",
-  backendWsUrl:
+  backendWsUrl: normalizeBackendWsUrl(
     import.meta.env.WXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:3000/ws",
+  ),
   themeMode: "system",
   displayName: "Guest",
 };
@@ -92,7 +94,7 @@ function normalizeSettings(settings: unknown): ExtensionSettings {
     backendWsUrl:
       typeof candidate.backendWsUrl === "string" &&
       candidate.backendWsUrl.trim().length > 0
-        ? candidate.backendWsUrl
+        ? normalizeBackendWsUrl(candidate.backendWsUrl)
         : DEFAULT_SETTINGS.backendWsUrl,
     themeMode:
       candidate.themeMode === "light" ||
