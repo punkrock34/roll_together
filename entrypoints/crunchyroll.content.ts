@@ -5,6 +5,8 @@ import {
   type ApplyRemotePlaybackMessage,
   type ContentOutboundMessage,
   type ContentSnapshotReason,
+  type PlayerRuntimeState,
+  type QueryPlayerStateMessage,
 } from "../src/core/messages";
 import { buildSyncDecision } from "../src/core/reconcile";
 import type { PlaybackSnapshot } from "../src/core/protocol";
@@ -12,24 +14,33 @@ import { getRoomIdFromUrl } from "../src/core/url";
 import {
   extractEpisodeInfo,
   findCrunchyrollPlayer,
+  seekCrunchyrollPlayer,
 } from "../src/providers/crunchyroll/player";
-import {
-  consumeRemoteEchoExpectation,
-  createRemoteEchoExpectation,
-  type RemoteEchoExpectation,
-} from "../src/providers/crunchyroll/remote-echo";
+import { detectLargeTimeDiscontinuity } from "../src/providers/crunchyroll/content-sync";
+import { buildPlayerRuntimeState } from "../src/providers/crunchyroll/player-runtime";
 
 export default defineContentScript({
   matches: ["*://crunchyroll.com/*", "*://*.crunchyroll.com/*"],
-  allFrames: true,
+  allFrames: false,
   runAt: "document_idle",
   main() {
     const FAST_SCAN_DELAYS_MS = [0, 50, 125, 250, 500, 900, 1_400];
     const FALLBACK_SCAN_INTERVAL_MS = 2_000;
     const PAGE_KEY_POLL_INTERVAL_MS = 1_000;
-    const KEEPALIVE_HEARTBEAT_INTERVAL_MS = 15_000;
-    const PLAYBACK_SYNC_INTERVAL_MS = 2_000;
+    const KEEPALIVE_HEARTBEAT_INTERVAL_MS = 8_000;
     const TIME_JUMP_THRESHOLD_SECONDS = 3;
+    const MAX_REMOTE_PLAY_RETRIES = 3;
+    const REMOTE_PLAY_RETRY_DELAY_MS = 140;
+    const SEEK_PLAY_GUARD_TIMEOUT_MS = 320;
+    const APPLY_SETTLE_DELAY_MS = 220;
+    const logSync = (message: string, details?: Record<string, unknown>) => {
+      if (details) {
+        console.log(`[rt-sync-content] ${message}`, details);
+        return;
+      }
+      console.log(`[rt-sync-content] ${message}`);
+    };
+
     const port = browser.runtime.connect({ name: CONTENT_PORT_NAME });
 
     let player: HTMLVideoElement | null = null;
@@ -38,113 +49,21 @@ export default defineContentScript({
     let scanBurstTimeoutIds: number[] = [];
     let lastPageKey = `${window.location.href}|${document.title}`;
     let lastObservedCurrentTime: number | undefined;
-    let pendingRemotePlayback: ApplyRemotePlaybackMessage | undefined;
-    let pendingRemoteRetryTimeoutId: number | undefined;
-    let pendingRemoteRetryCount = 0;
+    let heartbeatIntervalId: number | undefined;
+    let pagePollIntervalId: number | undefined;
+    let fallbackScanIntervalId: number | undefined;
+    let pendingRemoteMessage: ApplyRemotePlaybackMessage | undefined;
+    let queuedRemoteMessage: ApplyRemotePlaybackMessage | undefined;
+    let remoteApplyInFlight = false;
     let playPromise: Promise<void> | undefined;
-    let expectedRemoteEcho: RemoteEchoExpectation | undefined;
-    let lastSnapshotPostedAt = 0;
+    let lastAppliedRevision = 0;
+    let suppressLocalEventsUntil = 0;
     let portDisconnected = false;
 
-    const hasActiveRemoteEcho = () => {
-      if (!expectedRemoteEcho) {
-        return false;
-      }
-
-      if (Date.now() <= expectedRemoteEcho.expiresAt) {
-        return true;
-      }
-
-      expectedRemoteEcho = undefined;
-      return false;
-    };
-
-    const clearPendingRemoteRetry = () => {
-      if (pendingRemoteRetryTimeoutId) {
-        window.clearTimeout(pendingRemoteRetryTimeoutId);
-        pendingRemoteRetryTimeoutId = undefined;
-      }
-    };
-
-    const clearPendingRemotePlayback = () => {
-      pendingRemotePlayback = undefined;
-      pendingRemoteRetryCount = 0;
-      clearPendingRemoteRetry();
-    };
-
-    const isSameRemotePlayback = (
-      left: ApplyRemotePlaybackMessage | undefined,
-      right: ApplyRemotePlaybackMessage,
-    ) => {
-      if (!left) {
-        return false;
-      }
-
-      return (
-        left.roomId === right.roomId &&
-        left.hostSessionId === right.hostSessionId &&
-        left.playback.episodeUrl === right.playback.episodeUrl &&
-        left.playback.state === right.playback.state &&
-        left.playback.currentTime === right.playback.currentTime &&
-        left.playback.updatedAt === right.playback.updatedAt
-      );
-    };
-
-    const schedulePendingRemotePlaybackRetry = (delayMs = 500) => {
-      if (!pendingRemotePlayback || pendingRemoteRetryCount >= 6) {
-        return;
-      }
-
-      clearPendingRemoteRetry();
-      pendingRemoteRetryTimeoutId = window.setTimeout(() => {
-        pendingRemoteRetryTimeoutId = undefined;
-        pendingRemoteRetryCount += 1;
-        tryApplyPendingRemotePlayback(true);
-      }, delayMs);
-    };
-
-    const tryApplyPendingRemotePlayback = (isRetry = false) => {
-      if (!pendingRemotePlayback || hasActiveRemoteEcho()) {
-        return;
-      }
-
-      applyRemotePlayback(pendingRemotePlayback, isRetry);
-    };
-
-    const buildSnapshot = (): PlaybackSnapshot | null => {
-      if (!player) {
-        return null;
-      }
-
-      const episode = extractEpisodeInfo(window.location.href, document.title);
-
-      return {
-        ...episode,
-        state: player.paused ? "paused" : "playing",
-        currentTime: player.currentTime,
-        duration: Number.isFinite(player.duration) ? player.duration : null,
-        playbackRate: player.playbackRate,
-        updatedAt: Date.now(),
-      };
-    };
-
-    const sendSnapshot = (
-      snapshot: PlaybackSnapshot,
-      reason: ContentSnapshotReason,
-    ) => {
+    const safePostMessage = (message: ContentOutboundMessage) => {
       if (portDisconnected) {
         return;
       }
-
-      lastSnapshotPostedAt = Date.now();
-      const message: ContentOutboundMessage = {
-        type: "content:snapshot",
-        tabUrl: window.location.href,
-        episode: extractEpisodeInfo(window.location.href, document.title),
-        playback: snapshot,
-        roomIdFromUrl: getRoomIdFromUrl(window.location.href),
-        reason,
-      };
 
       try {
         port.postMessage(message);
@@ -156,56 +75,135 @@ export default defineContentScript({
               ? error
               : "";
         if (!errorMessage.includes("message channel is closed")) {
-          console.error("Failed to post playback snapshot", error);
+          console.error("Failed to post message to background", error);
         }
         portDisconnected = true;
       }
     };
 
-    const postSnapshot = (
-      reason: ContentSnapshotReason,
-      options?: { suppressRemoteEcho: boolean },
-    ) => {
+    const buildRuntimeState = (): PlayerRuntimeState | null => {
+      if (!player) {
+        return null;
+      }
+
+      const episode = extractEpisodeInfo(window.location.href, document.title);
+      return buildPlayerRuntimeState(player, episode.episodeId);
+    };
+
+    const buildSnapshot = (): PlaybackSnapshot | null => {
+      const runtime = buildRuntimeState();
+      if (!runtime) {
+        return null;
+      }
+      const episode = extractEpisodeInfo(window.location.href, document.title);
+      return {
+        ...episode,
+        state: runtime.paused ? "paused" : "playing",
+        currentTime: runtime.currentTime,
+        duration: runtime.duration,
+        playbackRate: runtime.playbackRate,
+        updatedAt: runtime.updatedAt,
+      };
+    };
+
+    const postSnapshot = (reason: ContentSnapshotReason) => {
+      if (remoteApplyInFlight && reason !== "heartbeat") {
+        return;
+      }
+
+      if (Date.now() < suppressLocalEventsUntil && reason !== "heartbeat") {
+        return;
+      }
+
       const snapshot = buildSnapshot();
       if (!snapshot) {
         return;
       }
 
-      if (options?.suppressRemoteEcho) {
-        const echoResult = consumeRemoteEchoExpectation(
-          expectedRemoteEcho,
-          snapshot,
-        );
-        expectedRemoteEcho = echoResult.nextExpectation;
-        if (echoResult.shouldSuppress) {
-          if (!echoResult.nextExpectation) {
-            clearPendingRemotePlayback();
-          }
-          sendSnapshot(snapshot, "remote-apply");
-          return;
-        }
-      }
-
-      sendSnapshot(snapshot, reason);
+      safePostMessage({
+        type: "content:snapshot",
+        tabUrl: window.location.href,
+        episode: extractEpisodeInfo(window.location.href, document.title),
+        playback: snapshot,
+        playerState: buildRuntimeState() ?? undefined,
+        roomIdFromUrl: getRoomIdFromUrl(window.location.href),
+        reason,
+      });
     };
 
-    const handleLocalChange = () => {
-      postSnapshot("interaction", { suppressRemoteEcho: true });
+    const queueLatestRemoteMessage = (message: ApplyRemotePlaybackMessage) => {
+      if (
+        !queuedRemoteMessage ||
+        message.revision >= queuedRemoteMessage.revision
+      ) {
+        queuedRemoteMessage = message;
+      }
     };
 
-    const applyRemotePlayback = (
-      message: ApplyRemotePlaybackMessage,
-      isRetry = false,
-    ) => {
-      if (!isRetry && !isSameRemotePlayback(pendingRemotePlayback, message)) {
-        pendingRemoteRetryCount = 0;
-        clearPendingRemoteRetry();
+    const setPendingRemoteMessage = (message: ApplyRemotePlaybackMessage) => {
+      if (
+        !pendingRemoteMessage ||
+        message.revision >= pendingRemoteMessage.revision
+      ) {
+        pendingRemoteMessage = message;
+      }
+    };
+
+    const applyNextQueuedRemoteIfAny = () => {
+      if (remoteApplyInFlight) {
+        return;
       }
 
-      pendingRemotePlayback = message;
+      let next: ApplyRemotePlaybackMessage | undefined;
+
+      if (
+        queuedRemoteMessage &&
+        queuedRemoteMessage.revision > lastAppliedRevision
+      ) {
+        next = queuedRemoteMessage;
+      }
+      queuedRemoteMessage = undefined;
+
+      if (
+        pendingRemoteMessage &&
+        pendingRemoteMessage.revision > lastAppliedRevision &&
+        (!next || pendingRemoteMessage.revision >= next.revision)
+      ) {
+        next = pendingRemoteMessage;
+      }
+      pendingRemoteMessage = undefined;
+
+      if (next) {
+        applyRemotePlayback(next);
+      }
+    };
+
+    const finishRemoteApply = (revision?: number) => {
+      if (revision !== undefined) {
+        lastAppliedRevision = Math.max(lastAppliedRevision, revision);
+      }
+      remoteApplyInFlight = false;
+      suppressLocalEventsUntil = Date.now() + 250;
+      applyNextQueuedRemoteIfAny();
+    };
+
+    const applyRemotePlayback = (message: ApplyRemotePlaybackMessage) => {
+      if (message.revision < lastAppliedRevision) {
+        return;
+      }
+
+      if (remoteApplyInFlight) {
+        queueLatestRemoteMessage(message);
+        return;
+      }
 
       const snapshot = buildSnapshot();
       if (!player || !snapshot) {
+        setPendingRemoteMessage(message);
+        return;
+      }
+
+      if (snapshot.episodeId !== message.playback.episodeId) {
         return;
       }
 
@@ -219,55 +217,163 @@ export default defineContentScript({
         !decision.shouldPlay &&
         !decision.shouldSeek
       ) {
-        clearPendingRemotePlayback();
-        expectedRemoteEcho = undefined;
+        lastAppliedRevision = Math.max(lastAppliedRevision, message.revision);
+        logSync("skip remote apply (already converged)", {
+          revision: message.revision,
+          roomId: message.roomId,
+        });
         return;
       }
 
-      expectedRemoteEcho = createRemoteEchoExpectation(
-        message.playback,
-        decision,
-      );
+      remoteApplyInFlight = true;
+      suppressLocalEventsUntil = Date.now() + 900;
 
-      if (decision.shouldPause) {
-        const pausePlayer = () => {
-          if (!player) {
-            return;
-          }
+      const delay = (ms: number) =>
+        new Promise<void>((resolve) => {
+          window.setTimeout(resolve, ms);
+        });
 
-          player.pause();
-          if (decision.shouldSeek) {
-            player.currentTime = decision.targetTime;
-          }
-          clearPendingRemotePlayback();
-        };
-
-        if (playPromise) {
-          void playPromise.finally(() => {
-            playPromise = undefined;
-            pausePlayer();
-          });
-        } else {
-          pausePlayer();
+      const waitForSeekSettle = async () => {
+        if (!player || !player.seeking) {
+          return;
         }
-        return;
-      }
 
-      if (decision.shouldPlay) {
-        playPromise = player.play();
-        void playPromise
-          .catch(() => undefined)
-          .finally(() => {
+        const seekTarget = player;
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const settle = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            seekTarget.removeEventListener("seeked", settle);
+            seekTarget.removeEventListener("canplay", settle);
+            window.clearTimeout(timeoutId);
+            resolve();
+          };
+
+          seekTarget.addEventListener("seeked", settle, { once: true });
+          seekTarget.addEventListener("canplay", settle, { once: true });
+          const timeoutId = window.setTimeout(settle, SEEK_PLAY_GUARD_TIMEOUT_MS);
+        });
+      };
+
+      const playWithRetry = async () => {
+        for (let attempt = 1; attempt <= MAX_REMOTE_PLAY_RETRIES; attempt += 1) {
+          if (!player) {
+            return false;
+          }
+
+          playPromise = player.play();
+          try {
+            await playPromise;
+            return true;
+          } catch (error: unknown) {
+            const domError =
+              typeof DOMException !== "undefined" && error instanceof DOMException
+                ? error
+                : undefined;
+            const canRetryAbort =
+              domError?.name === "AbortError" &&
+              attempt < MAX_REMOTE_PLAY_RETRIES;
+
+            if (canRetryAbort) {
+              logSync("retrying interrupted play()", {
+                revision: message.revision,
+                roomId: message.roomId,
+                attempt,
+              });
+              await delay(REMOTE_PLAY_RETRY_DELAY_MS);
+              continue;
+            }
+
+            if (error instanceof Error && error.message.trim().length > 0) {
+              console.warn("Remote play request failed", error.message);
+            }
+            return false;
+          } finally {
             playPromise = undefined;
-            schedulePendingRemotePlaybackRetry();
+          }
+        }
+
+        return false;
+      };
+
+      const runApply = async () => {
+        if (!player) {
+          finishRemoteApply();
+          return;
+        }
+
+        const targetStateIsPlaying = message.playback.state === "playing";
+        logSync("applying remote snapshot", {
+          revision: message.revision,
+          roomId: message.roomId,
+          targetState: message.playback.state,
+          targetTime: decision.targetTime,
+          shouldSeek: decision.shouldSeek,
+          shouldPlay: decision.shouldPlay,
+          shouldPause: decision.shouldPause,
+        });
+
+        if (decision.shouldSeek) {
+          if (!targetStateIsPlaying && !player.paused) {
+            player.pause();
+          }
+          const seekResult = seekCrunchyrollPlayer(player, decision.targetTime);
+          logSync("applied seek strategy", {
+            revision: message.revision,
+            roomId: message.roomId,
+            method: seekResult.method,
+            targetTime: seekResult.targetTime,
           });
-      }
+        } else if (decision.shouldPause) {
+          player.pause();
+        }
 
-      if (decision.shouldSeek) {
-        player.currentTime = decision.targetTime;
-      }
+        if (targetStateIsPlaying && (decision.shouldSeek || decision.shouldPlay)) {
+          await waitForSeekSettle();
+          await playWithRetry();
+        }
 
-      schedulePendingRemotePlaybackRetry(750);
+        window.setTimeout(() => {
+          logSync("remote apply settled", {
+            revision: message.revision,
+            roomId: message.roomId,
+          });
+          finishRemoteApply(message.revision);
+        }, APPLY_SETTLE_DELAY_MS);
+      };
+
+      void (async () => {
+        if (playPromise) {
+          try {
+            await playPromise;
+          } catch {
+            // Ignore: play promise interruption is expected during remote transitions.
+          }
+        }
+        await runApply();
+      })();
+    };
+
+    const respondToPlayerStateQuery = (message: QueryPlayerStateMessage) => {
+      const playerState = buildRuntimeState() ?? undefined;
+      const playback = buildSnapshot() ?? undefined;
+
+      safePostMessage({
+        type: "content:player-state",
+        commandId: message.commandId,
+        roomId: message.roomId,
+        revision: message.revision,
+        playerState,
+        playback,
+        error: playerState ? undefined : "Player unavailable.",
+      });
+    };
+
+    const tryApplyPendingRemote = () => {
+      applyNextQueuedRemoteIfAny();
     };
 
     const detachPlayer = () => {
@@ -275,7 +381,6 @@ export default defineContentScript({
       disposePlayerListeners = undefined;
       player = null;
       lastObservedCurrentTime = undefined;
-      expectedRemoteEcho = undefined;
     };
 
     const attachPlayer = (candidate: HTMLVideoElement) => {
@@ -285,58 +390,45 @@ export default defineContentScript({
 
       detachPlayer();
       clearScanBurst();
-      clearPendingRemoteRetry();
       player = candidate;
       const cleanups: Array<() => void> = [];
 
-      const localEvents = [
-        "play",
-        "pause",
-        "seeked",
-        "ratechange",
-        "loadedmetadata",
-        "durationchange",
-      ] as const;
-      for (const eventName of localEvents) {
-        candidate.addEventListener(eventName, handleLocalChange);
+      const addListener = (
+        eventName: keyof HTMLMediaElementEventMap,
+        handler: () => void,
+      ) => {
+        candidate.addEventListener(eventName, handler);
         cleanups.push(() => {
-          candidate.removeEventListener(eventName, handleLocalChange);
+          candidate.removeEventListener(eventName, handler);
         });
-      }
-
-      const handlePlaybackReady = () => {
-        tryApplyPendingRemotePlayback();
       };
-      candidate.addEventListener("playing", handlePlaybackReady);
-      candidate.addEventListener("canplay", handlePlaybackReady);
-      candidate.addEventListener("loadeddata", handlePlaybackReady);
-      cleanups.push(() => {
-        candidate.removeEventListener("playing", handlePlaybackReady);
-        candidate.removeEventListener("canplay", handlePlaybackReady);
-        candidate.removeEventListener("loadeddata", handlePlaybackReady);
+
+      addListener("play", () => postSnapshot("play"));
+      addListener("pause", () => postSnapshot("pause"));
+      addListener("seeked", () => postSnapshot("seeked"));
+
+      addListener("timeupdate", () => {
+        const currentTime = candidate.currentTime;
+        if (
+          detectLargeTimeDiscontinuity(
+            lastObservedCurrentTime,
+            currentTime,
+            TIME_JUMP_THRESHOLD_SECONDS,
+          )
+        ) {
+          postSnapshot("discontinuity");
+        }
+        lastObservedCurrentTime = currentTime;
       });
 
-      const handleTimeUpdate = () => {
-        const currentTime = candidate.currentTime;
-        const shouldPostPlaybackSync =
-          !candidate.paused &&
-          Date.now() - lastSnapshotPostedAt >= PLAYBACK_SYNC_INTERVAL_MS;
-
-        if (
-          lastObservedCurrentTime !== undefined &&
-          Math.abs(currentTime - lastObservedCurrentTime) >
-            TIME_JUMP_THRESHOLD_SECONDS
-        ) {
-          postSnapshot("interaction", { suppressRemoteEcho: true });
-        } else if (shouldPostPlaybackSync) {
-          postSnapshot("interaction", { suppressRemoteEcho: true });
-        }
-
-        lastObservedCurrentTime = currentTime;
-      };
-      candidate.addEventListener("timeupdate", handleTimeUpdate);
-      cleanups.push(() => {
-        candidate.removeEventListener("timeupdate", handleTimeUpdate);
+      addListener("playing", () => {
+        tryApplyPendingRemote();
+      });
+      addListener("canplay", () => {
+        tryApplyPendingRemote();
+      });
+      addListener("loadeddata", () => {
+        tryApplyPendingRemote();
       });
 
       disposePlayerListeners = () => {
@@ -346,7 +438,7 @@ export default defineContentScript({
       };
 
       postSnapshot("initial");
-      tryApplyPendingRemotePlayback();
+      tryApplyPendingRemote();
     };
 
     const clearScanBurst = () => {
@@ -410,7 +502,7 @@ export default defineContentScript({
       lastPageKey = nextPageKey;
       detachPlayer();
       scheduleScanBurst();
-      postSnapshot("navigation");
+      postSnapshot("initial");
     };
 
     const originalPushState = history.pushState.bind(history);
@@ -419,78 +511,66 @@ export default defineContentScript({
       window.setTimeout(handlePageChange, 0);
     };
 
-    history.pushState = ((...args: Parameters<History["pushState"]>) => {
-      const result = originalPushState(...args);
-      queuePageChangeCheck();
-      return result;
-    }) as History["pushState"];
-
-    history.replaceState = ((...args: Parameters<History["replaceState"]>) => {
-      const result = originalReplaceState(...args);
-      queuePageChangeCheck();
-      return result;
-    }) as History["replaceState"];
-
-    const handlePopState = () => {
+    history.pushState = (...args) => {
+      originalPushState(...args);
       queuePageChangeCheck();
     };
-    window.addEventListener("popstate", handlePopState);
-    window.addEventListener("pageshow", handlePopState);
-    const pageKeyPollIntervalId = window.setInterval(
+
+    history.replaceState = (...args) => {
+      originalReplaceState(...args);
+      queuePageChangeCheck();
+    };
+
+    window.addEventListener("popstate", queuePageChangeCheck);
+    pagePollIntervalId = window.setInterval(
       handlePageChange,
       PAGE_KEY_POLL_INTERVAL_MS,
     );
-    const fallbackScanIntervalId = window.setInterval(() => {
-      if (!player) {
-        scanForPlayer();
+
+    fallbackScanIntervalId = window.setInterval(() => {
+      if (!player || !player.isConnected) {
+        scheduleScan();
       }
     }, FALLBACK_SCAN_INTERVAL_MS);
-    const heartbeatIntervalId = window.setInterval(() => {
+
+    heartbeatIntervalId = window.setInterval(() => {
       postSnapshot("heartbeat");
     }, KEEPALIVE_HEARTBEAT_INTERVAL_MS);
 
-    const observer = new MutationObserver(() => {
-      scheduleScan();
+    port.onMessage.addListener((message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null
+      ) {
+        const typedMessage = message as { type?: string };
+        if (typedMessage.type === "background:apply-state-snapshot") {
+          applyRemotePlayback(message as ApplyRemotePlaybackMessage);
+          return;
+        }
+        if (typedMessage.type === "background:query-player-state") {
+          respondToPlayerStateQuery(message as QueryPlayerStateMessage);
+        }
+      }
     });
-
-    if (document.documentElement) {
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    }
 
     port.onDisconnect.addListener(() => {
       portDisconnected = true;
-      observer.disconnect();
       detachPlayer();
-      clearPendingRemotePlayback();
       clearScanBurst();
-      expectedRemoteEcho = undefined;
-      if (pageKeyPollIntervalId) {
-        window.clearInterval(pageKeyPollIntervalId);
-      }
       if (fallbackScanIntervalId) {
         window.clearInterval(fallbackScanIntervalId);
+        fallbackScanIntervalId = undefined;
+      }
+      if (pagePollIntervalId) {
+        window.clearInterval(pagePollIntervalId);
+        pagePollIntervalId = undefined;
       }
       if (heartbeatIntervalId) {
         window.clearInterval(heartbeatIntervalId);
-      }
-      history.pushState = originalPushState as History["pushState"];
-      history.replaceState = originalReplaceState as History["replaceState"];
-      window.removeEventListener("popstate", handlePopState);
-      window.removeEventListener("pageshow", handlePopState);
-    });
-
-    port.onMessage.addListener((message) => {
-      if (message.type === "background:apply-remote") {
-        applyRemotePlayback(message);
+        heartbeatIntervalId = undefined;
       }
     });
 
-    scanForPlayer();
-    if (!player) {
-      scheduleScanBurst();
-    }
+    scheduleScanBurst();
   },
 });
