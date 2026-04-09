@@ -13,9 +13,7 @@ import {
 } from "./room-connection";
 
 const mockIo = vi.fn();
-const mockTabsUpdate = vi.fn(
-  async (_tabId?: unknown, _updateProperties?: unknown) => undefined,
-);
+const mockTabsUpdate = vi.fn(async () => undefined);
 
 vi.mock("socket.io-client", () => ({
   io: (baseUrl: unknown, options: unknown) => mockIo(baseUrl, options),
