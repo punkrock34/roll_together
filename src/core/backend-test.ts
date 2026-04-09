@@ -1,3 +1,5 @@
+import { io, type Socket } from "socket.io-client";
+
 export interface BackendProbeResult {
   ok: boolean;
   message: string;
@@ -37,7 +39,12 @@ export function buildHealthCheckUrl(backendHttpUrl: string) {
 export function isValidBackendWebSocketUrl(backendWsUrl: string) {
   try {
     const url = new URL(backendWsUrl);
-    return url.protocol === "ws:" || url.protocol === "wss:";
+    return (
+      url.protocol === "ws:" ||
+      url.protocol === "wss:" ||
+      url.protocol === "http:" ||
+      url.protocol === "https:"
+    );
   } catch {
     return false;
   }
@@ -129,14 +136,28 @@ async function probeHealthEndpoint(
   }
 }
 
-function probeWebSocket(
+function resolveSocketEndpoint(backendWsUrl: string) {
+  const parsed = new URL(backendWsUrl);
+  const protocol =
+    parsed.protocol === "wss:"
+      ? "https:"
+      : parsed.protocol === "ws:"
+        ? "http:"
+        : parsed.protocol;
+
+  return {
+    baseUrl: `${protocol}//${parsed.host}`,
+    path: parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "/ws",
+  };
+}
+
+function probeSocketIo(
   backendWsUrl: string,
   timeoutMs: number,
 ): Promise<BackendProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    let opened = false;
-    let socket: WebSocket | undefined;
+    let socket: Socket | undefined;
 
     const finish = (result: BackendProbeResult) => {
       if (settled) {
@@ -146,12 +167,8 @@ function probeWebSocket(
       settled = true;
       globalThis.clearTimeout(timeoutId);
 
-      if (
-        socket &&
-        socket.readyState !== WebSocket.CLOSING &&
-        socket.readyState !== WebSocket.CLOSED
-      ) {
-        socket.close();
+      if (socket) {
+        socket.disconnect();
       }
 
       resolve(result);
@@ -165,37 +182,33 @@ function probeWebSocket(
     }, timeoutMs);
 
     try {
-      socket = new WebSocket(backendWsUrl);
+      const endpoint = resolveSocketEndpoint(backendWsUrl);
+      socket = io(endpoint.baseUrl, {
+        path: endpoint.path,
+        transports: ["websocket"],
+        timeout: timeoutMs,
+        reconnection: false,
+      });
     } catch {
       finish({
         ok: false,
-        message: "WebSocket URL is invalid.",
+        message: "Socket URL is invalid.",
       });
       return;
     }
 
-    socket.addEventListener("open", () => {
-      opened = true;
+    socket.on("connect", () => {
       finish({
         ok: true,
-        message: "WebSocket connection opened.",
+        message: "Socket.IO connection opened.",
       });
     });
 
-    socket.addEventListener("error", () => {
+    socket.on("connect_error", () => {
       finish({
         ok: false,
-        message: "WebSocket connection failed.",
+        message: "Socket.IO connection failed.",
       });
-    });
-
-    socket.addEventListener("close", () => {
-      if (!opened) {
-        finish({
-          ok: false,
-          message: "WebSocket closed before opening.",
-        });
-      }
     });
   });
 }
@@ -214,10 +227,10 @@ export async function testBackendConnection(
       });
 
   const websocketPromise = isValidBackendWebSocketUrl(backendWsUrl)
-    ? probeWebSocket(backendWsUrl, timeoutMs)
+    ? probeSocketIo(backendWsUrl, timeoutMs)
     : Promise.resolve<BackendProbeResult>({
         ok: false,
-        message: "WebSocket URL is invalid.",
+        message: "Socket URL is invalid.",
       });
 
   const [health, websocket] = await Promise.all([

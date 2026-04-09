@@ -36,5 +36,5 @@ export function didEpisodeChange(
   previousPlayback: PlaybackSnapshot | undefined,
   nextPlayback: PlaybackSnapshot,
 ) {
-  return previousPlayback?.episodeUrl !== nextPlayback.episodeUrl;
+  return previousPlayback?.episodeId !== nextPlayback.episodeId;
 }

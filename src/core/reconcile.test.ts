@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   buildSyncDecision,
@@ -9,6 +9,7 @@ import type { PlaybackSnapshot } from "./protocol";
 
 const basePlayback: PlaybackSnapshot = {
   provider: "crunchyroll",
+  episodeId: "example",
   episodeUrl: "https://www.crunchyroll.com/watch/example",
   episodeTitle: "Example Episode",
   state: "paused",
@@ -70,6 +71,52 @@ describe("buildSyncDecision", () => {
     expect(decision.shouldSeek).toBe(true);
   });
 
+  it("projects remote playing time using updatedAt before deciding seek", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8_000);
+    const decision = buildSyncDecision(
+      {
+        ...basePlayback,
+        state: "playing",
+        currentTime: 12,
+        updatedAt: 8_000,
+      },
+      {
+        ...basePlayback,
+        state: "playing",
+        currentTime: 8,
+        updatedAt: 4_000,
+      },
+      1,
+    );
+    nowSpy.mockRestore();
+
+    expect(decision.shouldSeek).toBe(false);
+    expect(decision.targetTime).toBe(12);
+  });
+
+  it("still seeks when projected remote drift remains above threshold", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8_000);
+    const decision = buildSyncDecision(
+      {
+        ...basePlayback,
+        state: "playing",
+        currentTime: 12,
+        updatedAt: 8_000,
+      },
+      {
+        ...basePlayback,
+        state: "playing",
+        currentTime: 8,
+        updatedAt: 7_500,
+      },
+      1,
+    );
+    nowSpy.mockRestore();
+
+    expect(decision.shouldSeek).toBe(true);
+    expect(decision.targetTime).toBe(8.5);
+  });
+
   it("skips corrections when playback is already close enough", () => {
     expect(
       needsPlaybackCorrection(basePlayback, {
@@ -82,6 +129,7 @@ describe("buildSyncDecision", () => {
   it("requests a seek when the remote room switches episodes", () => {
     const decision = buildSyncDecision(basePlayback, {
       ...basePlayback,
+      episodeId: "example-2",
       episodeUrl: "https://www.crunchyroll.com/watch/example-2",
       episodeTitle: "Example Episode 2",
       currentTime: 0,
@@ -129,6 +177,7 @@ describe("shouldAcceptRoomPlaybackUpdate", () => {
       shouldAcceptRoomPlaybackUpdate(
         {
           ...basePlayback,
+          episodeId: "example-2",
           episodeUrl: "https://www.crunchyroll.com/watch/example-2",
           episodeTitle: "Example Episode 2",
           updatedAt: 10,
@@ -145,6 +194,7 @@ describe("shouldAcceptRoomPlaybackUpdate", () => {
     expect(
       shouldAcceptRoomPlaybackUpdate(basePlayback, {
         ...basePlayback,
+        episodeId: "example-2",
         episodeUrl: "https://www.crunchyroll.com/watch/example-2",
         episodeTitle: "Example Episode 2",
         updatedAt: 10,

@@ -9,20 +9,36 @@ export interface SyncDecision {
   targetTime: number;
 }
 
+function resolveRemoteTargetTime(remote: PlaybackSnapshot, now: number) {
+  if (remote.state !== "playing") {
+    return remote.currentTime;
+  }
+
+  const elapsedSeconds = Math.max(0, (now - remote.updatedAt) / 1_000);
+  const projected = remote.currentTime + elapsedSeconds * remote.playbackRate;
+
+  if (remote.duration === null) {
+    return projected;
+  }
+
+  return Math.min(projected, remote.duration);
+}
+
 export function buildSyncDecision(
   local: PlaybackSnapshot,
   remote: PlaybackSnapshot,
   driftThresholdSeconds = SYNC_DRIFT_THRESHOLD_SECONDS,
 ): SyncDecision {
+  const targetTime = resolveRemoteTargetTime(remote, Date.now());
   const shouldSeek =
-    local.episodeUrl !== remote.episodeUrl ||
-    Math.abs(remote.currentTime - local.currentTime) > driftThresholdSeconds;
+    local.episodeId !== remote.episodeId ||
+    Math.abs(targetTime - local.currentTime) > driftThresholdSeconds;
 
   return {
     shouldPlay: local.state !== remote.state && remote.state === "playing",
     shouldPause: local.state !== remote.state && remote.state === "paused",
     shouldSeek,
-    targetTime: remote.currentTime,
+    targetTime,
   };
 }
 
@@ -36,7 +52,7 @@ export function arePlaybackSnapshotsSimilar(
   }
 
   return (
-    left.episodeUrl === right.episodeUrl &&
+    left.episodeId === right.episodeId &&
     left.state === right.state &&
     left.playbackRate === right.playbackRate &&
     left.duration === right.duration &&

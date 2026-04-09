@@ -2,6 +2,7 @@ import type {
   EpisodeInfo,
   ParticipantPresence,
   PlaybackSnapshot,
+  RoomStateSnapshot,
 } from "./protocol";
 import type { RecentRoomEntry, ThemeMode, WatchProgressEntry } from "./storage";
 
@@ -19,32 +20,79 @@ export type RoomConnectionStatus =
 
 export type ContentSnapshotReason =
   | "initial"
-  | "interaction"
+  | "play"
+  | "pause"
+  | "seeked"
+  | "discontinuity"
   | "heartbeat"
-  | "navigation"
   | "remote-apply";
+
+export interface PlayerRuntimeState {
+  paused: boolean;
+  currentTime: number;
+  duration: number | null;
+  playbackRate: number;
+  readyState: number;
+  seeking: boolean;
+  ended: boolean;
+  episodeId: string;
+  updatedAt: number;
+}
 
 export interface ContentSnapshotMessage {
   type: "content:snapshot";
   tabUrl: string;
   episode: EpisodeInfo;
   playback: PlaybackSnapshot;
+  playerState?: PlayerRuntimeState;
   roomIdFromUrl?: string | null;
   reason: ContentSnapshotReason;
 }
 
-export type ContentOutboundMessage = ContentSnapshotMessage;
+export interface ContentCommandResultMessage {
+  type: "content:command-result";
+  commandId: string;
+  revision: number;
+  status: "applied" | "failed" | "timed_out";
+  message?: string;
+  snapshot?: PlaybackSnapshot;
+}
+
+export interface ContentPlayerStateMessage {
+  type: "content:player-state";
+  commandId: string;
+  revision: number;
+  roomId: string;
+  playerState?: PlayerRuntimeState;
+  playback?: PlaybackSnapshot;
+  error?: string;
+}
+
+export type ContentOutboundMessage =
+  | ContentSnapshotMessage
+  | ContentCommandResultMessage
+  | ContentPlayerStateMessage;
 
 export interface ApplyRemotePlaybackMessage {
-  type: "background:apply-remote";
+  type: "background:apply-state-snapshot";
+  commandId: string;
   roomId: string;
-  participantCount: number;
-  hostSessionId: string;
+  revision: number;
+  state: RoomStateSnapshot;
   playback: PlaybackSnapshot;
   driftThresholdSeconds?: number;
 }
 
-export type BackgroundOutboundMessage = ApplyRemotePlaybackMessage;
+export interface QueryPlayerStateMessage {
+  type: "background:query-player-state";
+  commandId: string;
+  roomId: string;
+  revision: number;
+}
+
+export type BackgroundOutboundMessage =
+  | ApplyRemotePlaybackMessage
+  | QueryPlayerStateMessage;
 
 export interface PopupGetStateMessage {
   type: "popup:get-active-tab-state";
@@ -89,8 +137,10 @@ export interface PopupStateResponse {
   recentRooms: RecentRoomEntry[];
   watchProgress?: WatchProgressEntry;
   lastError?: string;
-  hostSessionId?: string;
   sessionId?: string;
+  roomRevision?: number;
+  episodeMismatch?: boolean;
+  episodeMismatchMessage?: string;
   isHost: boolean;
   themeMode: ThemeMode;
 }

@@ -9,6 +9,7 @@ import {
 
 const playback: PlaybackSnapshot = {
   provider: "crunchyroll",
+  episodeId: "vilos",
   episodeUrl: "https://static.crunchyroll.com/vilos-v2/web/vilos/player.html",
   episodeTitle: "Vilos",
   state: "playing",
@@ -28,6 +29,7 @@ describe("Crunchyroll tab context helpers", () => {
       ),
     ).toMatchObject({
       provider: "crunchyroll",
+      episodeId: "G14U43XM9",
       episodeUrl: "https://crunchyroll.com/watch/G14U43XM9/brave-volunteers",
       episodeTitle: "Attack on Titan E68 - Brave Volunteers",
       currentTime: 31,

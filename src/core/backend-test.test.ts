@@ -19,9 +19,9 @@ describe("backend connection helpers", () => {
     ).toBe("https://watch.example.com/roll-together/health");
   });
 
-  it("rejects invalid websocket urls", () => {
+  it("accepts valid socket urls", () => {
     expect(isValidBackendWebSocketUrl("https://watch.example.com/ws")).toBe(
-      false,
+      true,
     );
     expect(isValidBackendWebSocketUrl("wss://watch.example.com/ws")).toBe(true);
   });

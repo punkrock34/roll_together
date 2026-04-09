@@ -94,15 +94,7 @@ function getActionBadgeColor(session: TabSession): string {
 
 function getActionTitle(session: TabSession): string {
   if (session.connectionState === "connected" && session.roomId) {
-    const role =
-      session.sessionId && session.hostSessionId === session.sessionId
-        ? "host"
-        : "viewer";
-    return `Roll Together: ${role} in ${session.roomId.slice(0, 8)} with ${session.participantCount} viewer${session.participantCount === 1 ? "" : "s"}`;
-  }
-
-  if (session.connectionState === "switching") {
-    return "Roll Together: Switching episode";
+    return `Roll Together: connected to ${session.roomId.slice(0, 8)} with ${session.participantCount} viewer${session.participantCount === 1 ? "" : "s"}`;
   }
 
   if (session.connectionState === "connecting") {

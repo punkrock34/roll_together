@@ -1,143 +1,73 @@
 import type { Browser } from "wxt/browser";
 
-import type {
-  ApplyRemotePlaybackMessage,
-  ContentOutboundMessage,
-} from "../../core/messages";
-import { consumePendingHostTakeoverPlayback } from "../../core/host-transfer";
+import type { ContentOutboundMessage } from "../../core/messages";
 import type { PlaybackSnapshot } from "../../core/protocol";
-import {
-  arePlaybackSnapshotsSimilar,
-  buildSyncDecision,
-} from "../../core/reconcile";
+import { needsPlaybackCorrection } from "../../core/reconcile";
 import { upsertWatchProgress } from "../../core/storage";
 import { getRoomIdFromUrl } from "../../core/url";
 import {
-  didEpisodeChange,
   normalizePlaybackSnapshotForTab,
   resolveRoomIdForTabContext,
 } from "../../providers/crunchyroll/session";
+import { mapReasonToPlaybackCommand } from "../../providers/crunchyroll/content-sync";
 
 import type { TabSession } from "./session-state";
 
-const HOST_HEARTBEAT_INTERVAL_MS = 4_000;
 const WATCH_PROGRESS_WRITE_INTERVAL_MS = 15_000;
+const HEARTBEAT_CORRECTION_THRESHOLD_SECONDS = 3;
+const HEARTBEAT_STATE_REQUEST_COOLDOWN_MS = 6_000;
 
 interface ContentMessageControllerOptions {
   connectSession: (
     session: TabSession,
     requestedRoomId?: string,
   ) => Promise<void>;
-  sendRoomUpdate: (
+  sendPlaybackCommand: (
     session: TabSession,
-    type: "sync" | "navigate",
+    command: "play" | "pause" | "seek",
     playback: PlaybackSnapshot,
   ) => void;
-  postToContent: (
-    session: TabSession,
-    message: ApplyRemotePlaybackMessage,
-  ) => void;
+  requestRoomState: (session: TabSession) => void;
   publishRoomState: (session: TabSession) => void;
+}
+
+function shouldPersistWatchProgress(
+  session: TabSession,
+  previousPlayback: PlaybackSnapshot | undefined,
+  nextPlayback: PlaybackSnapshot,
+  reason:
+    | "initial"
+    | "play"
+    | "pause"
+    | "seeked"
+    | "discontinuity"
+    | "heartbeat"
+    | "remote-apply",
+) {
+  if (reason !== "heartbeat") {
+    return true;
+  }
+
+  if (nextPlayback.state !== "playing") {
+    return true;
+  }
+
+  if (previousPlayback?.episodeUrl !== nextPlayback.episodeUrl) {
+    return true;
+  }
+
+  return (
+    !session.lastWatchProgressAt ||
+    Date.now() - session.lastWatchProgressAt >= WATCH_PROGRESS_WRITE_INTERVAL_MS
+  );
 }
 
 export function createContentMessageController({
   connectSession,
-  sendRoomUpdate,
-  postToContent,
+  sendPlaybackCommand,
+  requestRoomState,
   publishRoomState,
 }: ContentMessageControllerOptions) {
-  const shouldSendHostUpdate = (
-    session: TabSession,
-    previousPlayback: PlaybackSnapshot | undefined,
-    nextPlayback: PlaybackSnapshot,
-    reason: ContentOutboundMessage["reason"],
-  ): "sync" | "navigate" | undefined => {
-    if (!session.roomId || !session.sessionId || !session.hostSessionId) {
-      return undefined;
-    }
-
-    if (session.pendingHostTakeoverPlayback) {
-      return undefined;
-    }
-
-    if (session.hostSessionId !== session.sessionId) {
-      return undefined;
-    }
-
-    if (reason === "remote-apply") {
-      return undefined;
-    }
-
-    if (didEpisodeChange(previousPlayback, nextPlayback)) {
-      return "navigate";
-    }
-
-    if (reason === "heartbeat") {
-      if (nextPlayback.state !== "playing") {
-        return undefined;
-      }
-
-      const enoughTimePassed =
-        !session.lastOutboundAt ||
-        Date.now() - session.lastOutboundAt >= HOST_HEARTBEAT_INTERVAL_MS;
-      if (
-        enoughTimePassed &&
-        !arePlaybackSnapshotsSimilar(
-          session.lastOutboundPlayback,
-          nextPlayback,
-          1,
-        )
-      ) {
-        return "sync";
-      }
-
-      return undefined;
-    }
-
-    if (
-      !arePlaybackSnapshotsSimilar(
-        session.lastOutboundPlayback,
-        nextPlayback,
-        0.15,
-      )
-    ) {
-      return "sync";
-    }
-
-    return undefined;
-  };
-
-  const handleFollowerCorrection = (
-    session: TabSession,
-    playback: PlaybackSnapshot,
-    reason: ContentOutboundMessage["reason"],
-  ) => {
-    if (
-      !session.roomId ||
-      !session.roomPlayback ||
-      reason === "heartbeat" ||
-      reason === "remote-apply"
-    ) {
-      return;
-    }
-
-    const decision = buildSyncDecision(playback, session.roomPlayback);
-    if (
-      playback.episodeUrl !== session.roomPlayback.episodeUrl ||
-      decision.shouldPause ||
-      decision.shouldPlay ||
-      decision.shouldSeek
-    ) {
-      postToContent(session, {
-        type: "background:apply-remote",
-        roomId: session.roomId,
-        participantCount: session.participantCount,
-        hostSessionId: session.hostSessionId ?? "",
-        playback: session.roomPlayback,
-      });
-    }
-  };
-
   const maybeAutoJoin = (session: TabSession) => {
     if (!session.localPlayback || !session.roomIdFromUrl) {
       return;
@@ -154,87 +84,73 @@ export function createContentMessageController({
       return;
     }
 
-    if (
-      session.connectionState === "connecting" ||
-      session.connectionState === "switching"
-    ) {
+    if (session.connectionState === "connecting") {
       return;
     }
 
     void connectSession(session, session.roomIdFromUrl);
   };
 
-  const resolveTabContext = (
-    session: TabSession,
-    message: ContentOutboundMessage,
-    port: Browser.runtime.Port,
-  ) => ({
-    tabUrl: session.tabUrl ?? port.sender?.tab?.url ?? message.tabUrl,
-    tabTitle:
-      session.tabTitle ??
-      port.sender?.tab?.title ??
-      message.episode.episodeTitle,
-  });
-
-  const shouldPersistWatchProgress = (
-    session: TabSession,
-    previousPlayback: PlaybackSnapshot | undefined,
-    nextPlayback: PlaybackSnapshot,
-    reason: ContentOutboundMessage["reason"],
-  ) => {
-    if (reason !== "heartbeat") {
-      return true;
-    }
-
-    if (nextPlayback.state !== "playing") {
-      return true;
-    }
-
-    if (previousPlayback?.episodeUrl !== nextPlayback.episodeUrl) {
-      return true;
-    }
-
-    return (
-      !session.lastWatchProgressAt ||
-      Date.now() - session.lastWatchProgressAt >=
-        WATCH_PROGRESS_WRITE_INTERVAL_MS
-    );
-  };
-
-  const queueWatchProgressUpdate = (
-    session: TabSession,
-    playback: PlaybackSnapshot,
-    previousPlayback: PlaybackSnapshot | undefined,
-    reason: ContentOutboundMessage["reason"],
-  ) => {
+  const requestCanonicalStateWithCooldown = (session: TabSession) => {
+    const now = Date.now();
     if (
-      !shouldPersistWatchProgress(session, previousPlayback, playback, reason)
+      session.lastStateRequestAt &&
+      now - session.lastStateRequestAt < HEARTBEAT_STATE_REQUEST_COOLDOWN_MS
     ) {
       return;
     }
 
-    session.lastWatchProgressAt = Date.now();
-    void upsertWatchProgress(playback).catch((error) => {
-      console.error("Failed to persist watch progress", error);
-    });
+    session.lastStateRequestAt = now;
+    requestRoomState(session);
+  };
+
+  const handleCommandResult = (
+    session: TabSession,
+    message: Extract<
+      ContentOutboundMessage,
+      { type: "content:command-result" }
+    >,
+  ) => {
+    if (session.latestDeliveredCommandId !== message.commandId) {
+      return;
+    }
+
+    session.latestCommandStatus = message.status;
+    session.latestCommandMessage = message.message;
+    if (message.status === "applied") {
+      session.latestAppliedRevision = message.revision;
+      if (message.snapshot) {
+        session.localPlayback = message.snapshot;
+      }
+      if (session.lastError && session.lastError.includes("command")) {
+        session.lastError = undefined;
+      }
+    } else if (message.status === "failed" || message.status === "timed_out") {
+      session.lastError = message.message ?? "Remote playback apply failed.";
+    }
   };
 
   const handleContentSnapshot = (
     session: TabSession,
-    message: ContentOutboundMessage,
+    message: Extract<ContentOutboundMessage, { type: "content:snapshot" }>,
     port: Browser.runtime.Port,
   ) => {
     const previousPlayback = session.localPlayback;
-    const liveTab = resolveTabContext(session, message, port);
+    const tabUrl = session.tabUrl ?? port.sender?.tab?.url ?? message.tabUrl;
+    const tabTitle =
+      session.tabTitle ??
+      port.sender?.tab?.title ??
+      message.episode.episodeTitle;
+
     const normalizedPlayback = normalizePlaybackSnapshotForTab(
       message.playback,
-      liveTab.tabUrl,
-      liveTab.tabTitle,
+      tabUrl,
+      tabTitle,
     );
 
     session.activeFrameId = port.sender?.frameId ?? 0;
-    session.tabUrl = liveTab.tabUrl ?? session.tabUrl ?? message.tabUrl;
-    session.tabTitle = liveTab.tabTitle ?? session.tabTitle;
+    session.tabUrl = tabUrl ?? session.tabUrl ?? message.tabUrl;
+    session.tabTitle = tabTitle ?? session.tabTitle;
     session.localPlayback = normalizedPlayback;
     session.roomIdFromUrl = resolveRoomIdForTabContext(
       session.tabUrl,
@@ -248,43 +164,51 @@ export function createContentMessageController({
       session.autoJoinSuppressedRoomId = undefined;
     }
 
-    queueWatchProgressUpdate(
-      session,
-      normalizedPlayback,
-      previousPlayback,
-      message.reason,
-    );
-
     if (
-      session.connectionState === "switching" &&
-      session.roomPlayback &&
-      session.roomPlayback.episodeUrl === normalizedPlayback.episodeUrl
+      shouldPersistWatchProgress(
+        session,
+        previousPlayback,
+        normalizedPlayback,
+        message.reason,
+      )
     ) {
-      session.connectionState = "connected";
+      session.lastWatchProgressAt = Date.now();
+      void upsertWatchProgress(normalizedPlayback).catch((error) => {
+        console.error("Failed to persist watch progress", error);
+      });
     }
 
-    if (session.socket?.readyState === WebSocket.OPEN && session.roomId) {
-      const takeoverState = consumePendingHostTakeoverPlayback(
-        session.pendingHostTakeoverPlayback,
-        normalizedPlayback,
-      );
-      session.pendingHostTakeoverPlayback = takeoverState.pendingPlayback;
+    if (session.connectionState === "connected" && session.roomId) {
+      const mappedCommand = mapReasonToPlaybackCommand(message.reason);
+      const roomEpisodeId = session.roomPlayback?.episodeId;
 
-      if (!takeoverState.blocked) {
-        const nextUpdateType = shouldSendHostUpdate(
-          session,
-          previousPlayback,
+      if (
+        session.episodeMismatch &&
+        roomEpisodeId &&
+        normalizedPlayback.episodeId === roomEpisodeId
+      ) {
+        session.episodeMismatch = undefined;
+        session.lastError = undefined;
+        requestCanonicalStateWithCooldown(session);
+      }
+
+      if (
+        mappedCommand &&
+        (!roomEpisodeId || normalizedPlayback.episodeId === roomEpisodeId)
+      ) {
+        sendPlaybackCommand(session, mappedCommand, normalizedPlayback);
+        session.lastError = undefined;
+      } else if (
+        message.reason === "heartbeat" &&
+        roomEpisodeId &&
+        normalizedPlayback.episodeId === roomEpisodeId &&
+        needsPlaybackCorrection(
           normalizedPlayback,
-          message.reason,
-        );
-
-        if (nextUpdateType) {
-          sendRoomUpdate(session, nextUpdateType, normalizedPlayback);
-          session.connectionState = "connected";
-          session.lastError = undefined;
-        } else if (session.hostSessionId !== session.sessionId) {
-          handleFollowerCorrection(session, normalizedPlayback, message.reason);
-        }
+          session.roomPlayback,
+          HEARTBEAT_CORRECTION_THRESHOLD_SECONDS,
+        )
+      ) {
+        requestCanonicalStateWithCooldown(session);
       }
     } else if (!session.roomId) {
       session.connectionState = "ready";
@@ -294,7 +218,23 @@ export function createContentMessageController({
     publishRoomState(session);
   };
 
+  const handleContentMessage = (
+    session: TabSession,
+    message: ContentOutboundMessage,
+    port: Browser.runtime.Port,
+  ) => {
+    if (message.type === "content:command-result") {
+      handleCommandResult(session, message);
+      publishRoomState(session);
+      return;
+    }
+
+    if (message.type === "content:snapshot") {
+      handleContentSnapshot(session, message, port);
+    }
+  };
+
   return {
-    handleContentSnapshot,
+    handleContentMessage,
   };
 }

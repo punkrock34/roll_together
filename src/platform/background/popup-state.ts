@@ -99,11 +99,13 @@ export function createPopupStateController({
         currentPlayback?.episodeUrl,
       ),
       lastError: session?.lastError,
-      hostSessionId: session?.hostSessionId,
       sessionId: session?.sessionId,
-      isHost:
-        Boolean(session?.sessionId) &&
-        session?.hostSessionId === session?.sessionId,
+      roomRevision: session?.roomRevision,
+      episodeMismatch: Boolean(session?.episodeMismatch),
+      episodeMismatchMessage: session?.episodeMismatch
+        ? "Room episode does not match local episode."
+        : undefined,
+      isHost: false,
       themeMode: settings.themeMode,
     };
   };

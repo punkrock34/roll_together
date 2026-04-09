@@ -1,9 +1,11 @@
 import type { Browser } from "wxt/browser";
+import type { Socket } from "socket.io-client";
 
 import type { RoomConnectionStatus } from "../../core/messages";
 import type {
   ParticipantPresence,
   PlaybackSnapshot,
+  RoomStateSnapshot,
 } from "../../core/protocol";
 
 export interface TabSession {
@@ -14,23 +16,50 @@ export interface TabSession {
   tabTitle?: string;
   localPlayback?: PlaybackSnapshot;
   roomPlayback?: PlaybackSnapshot;
+  roomState?: RoomStateSnapshot;
+  roomRevision?: number;
+  latestAppliedRevision?: number;
+  latestDeliveredCommandId?: string;
+  latestCommandStatus?: "delivered" | "applied" | "failed" | "timed_out";
+  latestCommandMessage?: string;
   roomIdFromUrl?: string | null;
   roomId?: string;
   sessionId?: string;
-  hostSessionId?: string;
-  pendingHostTakeoverPlayback?: PlaybackSnapshot;
+  episodeMismatch?: {
+    localEpisodeId?: string;
+    roomEpisodeId: string;
+  };
   participantCount: number;
   participants: ParticipantPresence[];
   connectionState: RoomConnectionStatus;
   lastError?: string;
-  socket?: WebSocket;
+  socket?: Socket;
   pingInterval?: ReturnType<typeof setInterval>;
   reconnectTimeout?: ReturnType<typeof setTimeout>;
   cleanupTimeout?: ReturnType<typeof setTimeout>;
   autoJoinSuppressedRoomId?: string;
-  lastOutboundPlayback?: PlaybackSnapshot;
-  lastOutboundAt?: number;
   lastWatchProgressAt?: number;
+  lastStateRequestAt?: number;
+  lastSameRevisionReapplyAt?: number;
+  verificationTransaction?: {
+    commandId: string;
+    roomId: string;
+    revision: number;
+    targetPlayback: PlaybackSnapshot;
+    targetState: "playing" | "paused";
+    requiresSeek: boolean;
+    deadlineAt: number;
+    playBaselineAt?: number;
+    playBaselineTime?: number;
+    pollInterval?: ReturnType<typeof setInterval>;
+  };
+  watchdogInterval?: ReturnType<typeof setInterval>;
+  watchdogPending?: {
+    commandId: string;
+    roomId: string;
+    revision: number;
+    issuedAt: number;
+  };
   reconnectAttempt: number;
 }
 
