@@ -1,6 +1,9 @@
 import type { Browser } from "wxt/browser";
 
-import type { ContentOutboundMessage } from "../../core/messages";
+import type {
+  ContentOutboundMessage,
+  ContentSnapshotReason,
+} from "../../core/messages";
 import type { PlaybackSnapshot } from "../../core/protocol";
 import { needsPlaybackCorrection } from "../../core/reconcile";
 import { upsertWatchProgress } from "../../core/storage";
@@ -9,13 +12,28 @@ import {
   normalizePlaybackSnapshotForTab,
   resolveRoomIdForTabContext,
 } from "../../providers/crunchyroll/session";
-import { mapReasonToPlaybackCommand } from "../../providers/crunchyroll/content-sync";
 
 import type { TabSession } from "./session-state";
 
 const WATCH_PROGRESS_WRITE_INTERVAL_MS = 15_000;
 const HEARTBEAT_CORRECTION_THRESHOLD_SECONDS = 3;
 const HEARTBEAT_STATE_REQUEST_COOLDOWN_MS = 6_000;
+
+function mapReasonToPlaybackCommand(reason: ContentSnapshotReason) {
+  if (reason === "play") {
+    return "play" as const;
+  }
+
+  if (reason === "pause") {
+    return "pause" as const;
+  }
+
+  if (reason === "seeked") {
+    return "seek" as const;
+  }
+
+  return undefined;
+}
 
 interface ContentMessageControllerOptions {
   connectSession: (

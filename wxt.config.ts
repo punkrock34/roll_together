@@ -12,6 +12,8 @@ export default defineConfig({
     description:
       "Anonymous Crunchyroll watch parties with local-first progress and a self-hosted backend.",
     version: "4.5.1",
+    // Keep provider-scoped upfront permissions so page-context integration works
+    // immediately on supported Crunchyroll pages.
     permissions: ["storage", "tabs"],
     host_permissions: crunchyrollMatches,
     minimum_chrome_version: "116",
