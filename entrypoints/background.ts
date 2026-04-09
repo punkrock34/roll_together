@@ -4,8 +4,9 @@ import {
   CONTENT_PORT_NAME,
   POPUP_PORT_NAME,
   POPUP_STATE_PORT_NAME,
-  type ApplyRemotePlaybackMessage,
+  type BackgroundOutboundMessage,
   type ContentOutboundMessage,
+  type ContentPlayerStateMessage,
   type PopupRequestMessage,
   type PopupStateResponse,
 } from "../src/core/messages";
@@ -36,19 +37,21 @@ export default defineBackground({
 
     const postToContent = (
       session: TabSession,
-      message: ApplyRemotePlaybackMessage,
+      message: BackgroundOutboundMessage,
     ) => {
       const port = getActivePort(session);
       if (!port) {
-        return;
+        return false;
       }
 
       try {
         port.postMessage(message);
+        return true;
       } catch (error) {
         if (!isIgnorablePortError(error)) {
           console.error("Failed to post to content script", error);
         }
+        return false;
       }
     };
 
@@ -64,8 +67,8 @@ export default defineBackground({
     });
     const contentMessageController = createContentMessageController({
       connectSession: roomConnectionController.connectSession,
-      sendRoomUpdate: roomConnectionController.sendRoomUpdate,
-      postToContent,
+      sendPlaybackCommand: roomConnectionController.sendPlaybackCommand,
+      requestRoomState: roomConnectionController.requestRoomState,
       publishRoomState,
     });
 
@@ -106,15 +109,9 @@ export default defineBackground({
         case "popup:transfer-host": {
           const session = sessions.get(message.tabId);
           if (session) {
-            const sent = roomConnectionController.transferRoomHost(
-              session,
-              message.targetSessionId,
-            );
-            if (!sent) {
-              session.lastError =
-                "Reconnect to the room before transferring host control.";
-              publishRoomState(session);
-            }
+            session.lastError =
+              "Host transfer is disabled in the shared-control sync model.";
+            publishRoomState(session);
           }
           return popupStateController.buildActivePopupState();
         }
@@ -222,12 +219,7 @@ export default defineBackground({
 
       const session = getOrCreateSession(sessions, tabId);
       session.ports.set(frameId, port);
-      session.connectionState =
-        session.roomId && session.connectionState !== "switching"
-          ? "connected"
-          : session.connectionState === "switching"
-            ? "switching"
-            : "ready";
+      session.connectionState = session.roomId ? "connected" : "ready";
 
       if (session.cleanupTimeout) {
         clearTimeout(session.cleanupTimeout);
@@ -237,7 +229,15 @@ export default defineBackground({
       publishRoomState(session);
 
       port.onMessage.addListener((message: ContentOutboundMessage) => {
-        void contentMessageController.handleContentSnapshot(
+        if (message.type === "content:player-state") {
+          roomConnectionController.handlePlayerState(
+            session,
+            message as ContentPlayerStateMessage,
+          );
+          return;
+        }
+
+        void contentMessageController.handleContentMessage(
           session,
           message,
           port,
@@ -288,11 +288,7 @@ export default defineBackground({
           changeInfo.url,
           session.roomIdFromUrl,
         );
-        if (session.roomId) {
-          session.connectionState = "switching";
-          session.lastError = undefined;
-          publishRoomState(session);
-        }
+        publishRoomState(session);
       }
 
       if (typeof tab.title === "string" && tab.title.trim().length > 0) {
