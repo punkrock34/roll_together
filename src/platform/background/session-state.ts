@@ -5,6 +5,7 @@ import type { RoomConnectionStatus } from "../../core/messages";
 import type {
   ParticipantPresence,
   PlaybackSnapshot,
+  RoomControlMode,
   RoomStateSnapshot,
 } from "../../core/protocol";
 
@@ -18,6 +19,12 @@ export interface TabSession {
   roomPlayback?: PlaybackSnapshot;
   roomState?: RoomStateSnapshot;
   roomRevision?: number;
+  navigationRevision?: number;
+  hostSessionId?: string;
+  controlMode?: RoomControlMode;
+  canControlPlayback: boolean;
+  canNavigateEpisodes: boolean;
+  canTransferHost: boolean;
   latestAppliedRevision?: number;
   latestDeliveredCommandId?: string;
   latestCommandStatus?: "delivered" | "applied" | "failed" | "timed_out";
@@ -60,6 +67,13 @@ export interface TabSession {
     revision: number;
     issuedAt: number;
   };
+  pendingRemoteNavigation?: {
+    navigationRevision: number;
+    episodeId: string;
+    targetUrl: string;
+    initiatedBySessionId: string;
+    issuedAt: number;
+  };
   reconnectAttempt: number;
 }
 
@@ -78,6 +92,9 @@ export function getOrCreateSession(
     participantCount: 1,
     participants: [],
     connectionState: "ready",
+    canControlPlayback: false,
+    canNavigateEpisodes: false,
+    canTransferHost: false,
     reconnectAttempt: 0,
   };
   sessions.set(tabId, created);

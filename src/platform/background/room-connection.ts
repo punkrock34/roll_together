@@ -1,4 +1,5 @@
 import { io, type Socket } from "socket.io-client";
+import { browser } from "wxt/browser";
 
 import type {
   ApplyRemotePlaybackMessage,
@@ -11,13 +12,19 @@ import {
   parseCommandErrorPayload,
   parseHeartbeatAckPayload,
   parsePresenceUpdatePayload,
+  parseRoomNavigationPayload,
   parseRoomJoinedPayload,
   parseStateSnapshotPayload,
+  resolveRoomCapabilities,
   type PlaybackSnapshot,
+  type RoomNavigationPayload,
   type RoomStateSnapshot,
 } from "../../core/protocol";
 import { getSettings, upsertRecentRoom } from "../../core/storage";
-import { buildSyncDecision, needsPlaybackCorrection } from "../../core/reconcile";
+import {
+  buildSyncDecision,
+  needsPlaybackCorrection,
+} from "../../core/reconcile";
 import { buildRoomInviteUrl } from "../../core/url";
 
 import { getActivePort, type TabSession } from "./session-state";
@@ -34,6 +41,19 @@ const WATCHDOG_POLL_INTERVAL_MS = 1_200;
 const WATCHDOG_PENDING_TIMEOUT_MS = 2_000;
 const WATCHDOG_DRIFT_THRESHOLD_SECONDS = 2.4;
 const WATCHDOG_STATE_REQUEST_COOLDOWN_MS = 1_500;
+const ENABLE_SYNC_DEBUG_LOGS = import.meta.env.WXT_PUBLIC_SYNC_DEBUG === "1";
+const IMPORTANT_SYNC_EVENTS = new Set([
+  "playback_command_emit",
+  "playback_command_applied",
+  "playback_command_failed",
+  "room_navigation_emit",
+  "room_navigation_follow",
+  "room_navigation_failed",
+  "room_navigation_applied",
+  "host_transfer_emit",
+  "room_control_mode_emit",
+  "command_error",
+]);
 
 export interface CommandVerificationProgress {
   playBaselineAt?: number;
@@ -46,13 +66,17 @@ export interface CommandVerificationContext {
   requiresSeek: boolean;
 }
 
-function resolveExpectedPlaybackTime(snapshot: PlaybackSnapshot, now = Date.now()) {
+function resolveExpectedPlaybackTime(
+  snapshot: PlaybackSnapshot,
+  now = Date.now(),
+) {
   if (snapshot.state !== "playing") {
     return snapshot.currentTime;
   }
 
   const elapsedSeconds = Math.max(0, (now - snapshot.updatedAt) / 1_000);
-  const projected = snapshot.currentTime + elapsedSeconds * snapshot.playbackRate;
+  const projected =
+    snapshot.currentTime + elapsedSeconds * snapshot.playbackRate;
 
   if (snapshot.duration === null) {
     return projected;
@@ -164,12 +188,47 @@ export function createRoomConnectionController({
   queuePopupStatePublish,
   postToContent,
 }: RoomConnectionControllerOptions) {
-  const logSync = (message: string, details?: Record<string, unknown>) => {
-    if (details) {
-      console.log(`[rt-sync-bg] ${message}`, details);
+  const logSync = (event: string, details?: Record<string, unknown>) => {
+    if (!ENABLE_SYNC_DEBUG_LOGS || !IMPORTANT_SYNC_EVENTS.has(event)) {
       return;
     }
-    console.log(`[rt-sync-bg] ${message}`);
+
+    console.log("[rt-sync-bg]", {
+      event,
+      ...(details ?? {}),
+    });
+  };
+
+  const clearCapabilities = (session: TabSession) => {
+    session.canControlPlayback = false;
+    session.canNavigateEpisodes = false;
+    session.canTransferHost = false;
+  };
+
+  const refreshCapabilities = (session: TabSession) => {
+    if (!session.sessionId || !session.hostSessionId || !session.controlMode) {
+      clearCapabilities(session);
+      return;
+    }
+
+    const capabilities = resolveRoomCapabilities({
+      controlMode: session.controlMode,
+      hostSessionId: session.hostSessionId,
+      sessionId: session.sessionId,
+    });
+    session.canControlPlayback = capabilities.canControlPlayback;
+    session.canNavigateEpisodes = capabilities.canNavigate;
+    session.canTransferHost = capabilities.canTransferHost;
+  };
+
+  const applyAuthorityFromRoomState = (
+    session: TabSession,
+    state: RoomStateSnapshot,
+  ) => {
+    session.hostSessionId = state.hostSessionId;
+    session.controlMode = state.controlMode;
+    session.navigationRevision = state.navigationRevision;
+    refreshCapabilities(session);
   };
 
   const requestCanonicalState = (session: TabSession) => {
@@ -328,7 +387,8 @@ export function createRoomConnectionController({
 
     const stalePending =
       session.watchdogPending &&
-      Date.now() - session.watchdogPending.issuedAt > WATCHDOG_PENDING_TIMEOUT_MS;
+      Date.now() - session.watchdogPending.issuedAt >
+        WATCHDOG_PENDING_TIMEOUT_MS;
     if (stalePending) {
       session.watchdogPending = undefined;
     }
@@ -402,6 +462,9 @@ export function createRoomConnectionController({
       session.roomPlayback = undefined;
       session.roomState = undefined;
       session.roomRevision = undefined;
+      session.navigationRevision = undefined;
+      session.hostSessionId = undefined;
+      session.controlMode = undefined;
       session.latestAppliedRevision = undefined;
       session.latestDeliveredCommandId = undefined;
       session.latestCommandStatus = undefined;
@@ -409,10 +472,13 @@ export function createRoomConnectionController({
       session.participantCount = 1;
       session.participants = [];
       session.episodeMismatch = undefined;
+      session.pendingRemoteNavigation = undefined;
+      clearCapabilities(session);
     }
 
     if (options.clearIdentity) {
       session.sessionId = undefined;
+      clearCapabilities(session);
     }
   };
 
@@ -431,6 +497,92 @@ export function createRoomConnectionController({
     }, delayMs);
   };
 
+  const followRoomNavigation = (
+    session: TabSession,
+    navigation: Pick<
+      RoomNavigationPayload,
+      | "roomId"
+      | "revision"
+      | "navigationRevision"
+      | "initiatedBySessionId"
+      | "playback"
+    >,
+  ) => {
+    if (!session.roomId || navigation.roomId !== session.roomId) {
+      return;
+    }
+
+    if (
+      session.sessionId &&
+      navigation.initiatedBySessionId === session.sessionId
+    ) {
+      session.pendingRemoteNavigation = undefined;
+      session.connectionState = "connected";
+      session.lastError = undefined;
+      return;
+    }
+
+    if (session.localPlayback?.episodeId === navigation.playback.episodeId) {
+      session.pendingRemoteNavigation = undefined;
+      session.connectionState = "connected";
+      session.episodeMismatch = undefined;
+      session.lastError = undefined;
+      requestCanonicalState(session);
+      return;
+    }
+
+    const existing = session.pendingRemoteNavigation;
+    if (
+      existing &&
+      existing.episodeId === navigation.playback.episodeId &&
+      existing.navigationRevision >= navigation.navigationRevision
+    ) {
+      return;
+    }
+
+    const targetUrl = buildRoomInviteUrl(
+      navigation.playback.episodeUrl,
+      navigation.roomId,
+    );
+    session.pendingRemoteNavigation = {
+      navigationRevision: navigation.navigationRevision,
+      episodeId: navigation.playback.episodeId,
+      targetUrl,
+      initiatedBySessionId: navigation.initiatedBySessionId,
+      issuedAt: Date.now(),
+    };
+    session.connectionState = "switching";
+    session.episodeMismatch = {
+      localEpisodeId: session.localPlayback?.episodeId,
+      roomEpisodeId: navigation.playback.episodeId,
+    };
+    session.lastError = undefined;
+    publishRoomState(session);
+
+    void browser.tabs
+      .update(session.tabId, { url: targetUrl })
+      .then(() => {
+        logSync("room_navigation_follow", {
+          tabId: session.tabId,
+          roomId: navigation.roomId,
+          revision: navigation.revision,
+          navigationRevision: navigation.navigationRevision,
+          episodeId: navigation.playback.episodeId,
+          initiatedBySessionId: navigation.initiatedBySessionId,
+        });
+      })
+      .catch(() => {
+        session.lastError = "Failed to follow room episode navigation.";
+        publishRoomState(session);
+        logSync("room_navigation_failed", {
+          tabId: session.tabId,
+          roomId: navigation.roomId,
+          navigationRevision: navigation.navigationRevision,
+          episodeId: navigation.playback.episodeId,
+        });
+      });
+  };
+
   const deliverRoomSnapshotToContent = (
     session: TabSession,
     state: RoomStateSnapshot,
@@ -440,12 +592,13 @@ export function createRoomConnectionController({
     }
 
     if (session.localPlayback.episodeId !== state.playback.episodeId) {
-      session.episodeMismatch = {
-        localEpisodeId: session.localPlayback.episodeId,
-        roomEpisodeId: state.playback.episodeId,
-      };
-      session.lastError =
-        "Room is on a different episode. Open the same episode to sync playback.";
+      followRoomNavigation(session, {
+        roomId: state.roomId,
+        revision: state.revision,
+        navigationRevision: state.navigationRevision,
+        initiatedBySessionId: state.hostSessionId,
+        playback: state.playback,
+      });
       return;
     }
 
@@ -483,7 +636,7 @@ export function createRoomConnectionController({
       : "Failed to deliver playback command to content script.";
     if (!delivered) {
       session.lastError = session.latestCommandMessage;
-      logSync("failed to deliver remote snapshot command", {
+      logSync("playback_command_failed", {
         tabId: session.tabId,
         roomId: state.roomId,
         revision: state.revision,
@@ -491,7 +644,7 @@ export function createRoomConnectionController({
       return;
     }
 
-    logSync("delivered remote snapshot command", {
+    logSync("playback_command_applied", {
       tabId: session.tabId,
       roomId: state.roomId,
       revision: state.revision,
@@ -542,7 +695,8 @@ export function createRoomConnectionController({
       const now = Date.now();
       if (
         session.lastSameRevisionReapplyAt &&
-        now - session.lastSameRevisionReapplyAt < SAME_REVISION_REAPPLY_COOLDOWN_MS
+        now - session.lastSameRevisionReapplyAt <
+          SAME_REVISION_REAPPLY_COOLDOWN_MS
       ) {
         return;
       }
@@ -555,6 +709,16 @@ export function createRoomConnectionController({
       session.participantCount = state.participantCount;
       session.participants = state.participants;
       session.lastError = undefined;
+      applyAuthorityFromRoomState(session, state);
+
+      if (
+        session.pendingRemoteNavigation &&
+        session.pendingRemoteNavigation.episodeId ===
+          state.playback.episodeId &&
+        session.localPlayback?.episodeId === state.playback.episodeId
+      ) {
+        session.pendingRemoteNavigation = undefined;
+      }
       deliverRoomSnapshotToContent(session, state);
       return;
     }
@@ -567,6 +731,15 @@ export function createRoomConnectionController({
     session.participantCount = state.participantCount;
     session.participants = state.participants;
     session.lastError = undefined;
+    applyAuthorityFromRoomState(session, state);
+
+    if (
+      session.pendingRemoteNavigation &&
+      session.pendingRemoteNavigation.episodeId === state.playback.episodeId &&
+      session.localPlayback?.episodeId === state.playback.episodeId
+    ) {
+      session.pendingRemoteNavigation = undefined;
+    }
     if (
       session.verificationTransaction &&
       session.verificationTransaction.revision < state.revision
@@ -589,7 +762,9 @@ export function createRoomConnectionController({
     session.connectionState = "connected";
     session.roomId = parsed.roomId;
     session.sessionId = parsed.sessionId;
+    session.pendingRemoteNavigation = undefined;
     session.reconnectAttempt = 0;
+    refreshCapabilities(session);
 
     applyIncomingRoomState(session, parsed.state);
 
@@ -632,6 +807,43 @@ export function createRoomConnectionController({
     publishRoomState(session);
   };
 
+  const handleRoomNavigation = (session: TabSession, payload: unknown) => {
+    const parsed = parseRoomNavigationPayload(payload);
+    if (!parsed) {
+      session.connectionState = "error";
+      session.lastError = "Received invalid room_navigation payload.";
+      publishRoomState(session);
+      return;
+    }
+
+    if (session.roomId && parsed.roomId !== session.roomId) {
+      return;
+    }
+
+    if (
+      session.navigationRevision !== undefined &&
+      parsed.navigationRevision < session.navigationRevision
+    ) {
+      return;
+    }
+
+    session.roomRevision = Math.max(session.roomRevision ?? 0, parsed.revision);
+    session.navigationRevision = parsed.navigationRevision;
+    session.roomPlayback = parsed.playback;
+
+    logSync("room_navigation_applied", {
+      tabId: session.tabId,
+      roomId: parsed.roomId,
+      revision: parsed.revision,
+      navigationRevision: parsed.navigationRevision,
+      episodeId: parsed.playback.episodeId,
+      initiatedBySessionId: parsed.initiatedBySessionId,
+    });
+
+    followRoomNavigation(session, parsed);
+    publishRoomState(session);
+  };
+
   const handlePresenceUpdate = (session: TabSession, payload: unknown) => {
     const parsed = parsePresenceUpdatePayload(payload);
     if (!parsed) {
@@ -642,11 +854,20 @@ export function createRoomConnectionController({
     }
 
     session.connectionState =
-      session.roomId && session.connectionState !== "connecting"
+      session.roomId &&
+      session.connectionState !== "connecting" &&
+      session.connectionState !== "switching"
         ? "connected"
         : session.connectionState;
     session.participantCount = parsed.participantCount;
     session.participants = parsed.participants;
+    const derivedHost = parsed.participants.find(
+      (participant) => participant.isHost,
+    )?.sessionId;
+    if (derivedHost) {
+      session.hostSessionId = derivedHost;
+      refreshCapabilities(session);
+    }
     if (
       session.roomRevision === undefined ||
       parsed.revision > session.roomRevision
@@ -667,6 +888,12 @@ export function createRoomConnectionController({
 
     session.connectionState = session.roomId ? "connected" : "error";
     session.lastError = parsed.message;
+    logSync("command_error", {
+      tabId: session.tabId,
+      roomId: session.roomId,
+      code: parsed.code,
+      message: parsed.message,
+    });
     publishRoomState(session);
   };
 
@@ -888,6 +1115,13 @@ export function createRoomConnectionController({
       handleStateSnapshot(session, payload);
     });
 
+    socket.on("room_navigation", (payload: unknown) => {
+      if (session.socket !== socket) {
+        return;
+      }
+      handleRoomNavigation(session, payload);
+    });
+
     socket.on("presence_update", (payload: unknown) => {
       if (session.socket !== socket) {
         return;
@@ -952,7 +1186,7 @@ export function createRoomConnectionController({
       return;
     }
 
-    logSync("emit local playback command", {
+    logSync("playback_command_emit", {
       tabId: session.tabId,
       roomId: session.roomId,
       command,
@@ -967,6 +1201,92 @@ export function createRoomConnectionController({
     });
   };
 
+  const sendNavigateEpisode = (
+    session: TabSession,
+    playback: PlaybackSnapshot,
+  ) => {
+    if (
+      !session.socket ||
+      !session.socket.connected ||
+      !session.roomId ||
+      !session.canNavigateEpisodes
+    ) {
+      return;
+    }
+
+    if (
+      session.pendingRemoteNavigation?.episodeId === playback.episodeId ||
+      session.roomPlayback?.episodeId === playback.episodeId
+    ) {
+      return;
+    }
+
+    session.pendingRemoteNavigation = undefined;
+    session.connectionState = "switching";
+    session.episodeMismatch = undefined;
+    session.lastError = undefined;
+
+    logSync("room_navigation_emit", {
+      tabId: session.tabId,
+      roomId: session.roomId,
+      episodeId: playback.episodeId,
+      episodeUrl: playback.episodeUrl,
+    });
+
+    session.socket.emit("navigate_episode", {
+      version: PROTOCOL_VERSION,
+      playback,
+    });
+    publishRoomState(session);
+  };
+
+  const setRoomControlMode = (
+    session: TabSession,
+    controlMode: "host_only" | "shared_playback",
+  ) => {
+    if (
+      !session.socket ||
+      !session.socket.connected ||
+      !session.roomId ||
+      !session.canTransferHost
+    ) {
+      return;
+    }
+
+    logSync("room_control_mode_emit", {
+      tabId: session.tabId,
+      roomId: session.roomId,
+      controlMode,
+    });
+
+    session.socket.emit("set_room_control_mode", {
+      version: PROTOCOL_VERSION,
+      controlMode,
+    });
+  };
+
+  const transferHost = (session: TabSession, targetSessionId: string) => {
+    if (
+      !session.socket ||
+      !session.socket.connected ||
+      !session.roomId ||
+      !session.canTransferHost
+    ) {
+      return;
+    }
+
+    logSync("host_transfer_emit", {
+      tabId: session.tabId,
+      roomId: session.roomId,
+      targetSessionId,
+    });
+
+    session.socket.emit("transfer_host", {
+      version: PROTOCOL_VERSION,
+      targetSessionId,
+    });
+  };
+
   const requestRoomState = (session: TabSession) => {
     requestCanonicalState(session);
   };
@@ -976,6 +1296,9 @@ export function createRoomConnectionController({
     connectSession,
     handlePlayerState,
     sendPlaybackCommand,
+    sendNavigateEpisode,
+    setRoomControlMode,
+    transferHost,
     requestRoomState,
   };
 }

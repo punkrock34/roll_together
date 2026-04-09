@@ -22,6 +22,7 @@ const MAX_REMOTE_PLAY_RETRIES = 3;
 const REMOTE_PLAY_RETRY_DELAY_MS = 140;
 const SEEK_PLAY_GUARD_TIMEOUT_MS = 320;
 const APPLY_SETTLE_DELAY_MS = 220;
+const ENABLE_PAGE_SYNC_LOGS = false;
 
 export interface CrunchyrollPageControllerOptions {
   bridgeId: string;
@@ -59,6 +60,10 @@ export function createCrunchyrollPageController({
   const abortController = new AbortController();
 
   const log = (message: string, details?: Record<string, unknown>) => {
+    if (!ENABLE_PAGE_SYNC_LOGS) {
+      return;
+    }
+
     if (details) {
       console.log(`[rt-page] ${message}`, details);
       return;
@@ -342,7 +347,10 @@ export function createCrunchyrollPageController({
         adapter.pause();
       }
 
-      if (targetStateIsPlaying && (decision.shouldSeek || decision.shouldPlay)) {
+      if (
+        targetStateIsPlaying &&
+        (decision.shouldSeek || decision.shouldPlay)
+      ) {
         await waitForSeekSettle();
         const didPlay = await playWithRetry(message);
         if (!didPlay) {
@@ -455,7 +463,10 @@ export function createCrunchyrollPageController({
     },
   });
 
-  pagePollIntervalId = window.setInterval(handlePageChange, PAGE_KEY_POLL_INTERVAL_MS);
+  pagePollIntervalId = window.setInterval(
+    handlePageChange,
+    PAGE_KEY_POLL_INTERVAL_MS,
+  );
   heartbeatIntervalId = window.setInterval(() => {
     postSnapshot("heartbeat");
   }, KEEPALIVE_HEARTBEAT_INTERVAL_MS);
@@ -480,11 +491,9 @@ export function createCrunchyrollPageController({
   ).navigation;
 
   if (typeof navigationApi?.addEventListener === "function") {
-    navigationApi.addEventListener(
-      "navigate",
-      queuePageChangeCheck,
-      { signal: abortController.signal },
-    );
+    navigationApi.addEventListener("navigate", queuePageChangeCheck, {
+      signal: abortController.signal,
+    });
   }
 
   const handleBridgeMessage = (message: BridgeContentToPageMessage) => {

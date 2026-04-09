@@ -7,7 +7,8 @@ export const CRUNCHYROLL_VIDEO_SELECTORS = [
   "video[data-testid='vilos-video']",
   "video",
 ];
-const NEW_UI_BOTTOM_CONTROLS_SELECTOR = '[data-testid="bottom-controls-autohide"]';
+const NEW_UI_BOTTOM_CONTROLS_SELECTOR =
+  '[data-testid="bottom-controls-autohide"]';
 
 export type CrunchyrollSeekMethod =
   | "react-seekTo"
@@ -21,7 +22,10 @@ export interface CrunchyrollSeekResult {
 }
 
 type SearchRoot = Document | ShadowRoot;
-type RectLike = Pick<DOMRect, "left" | "top" | "right" | "bottom" | "width" | "height">;
+type RectLike = Pick<
+  DOMRect,
+  "left" | "top" | "right" | "bottom" | "width" | "height"
+>;
 
 export function isCrunchyrollUrl(url: string): boolean {
   try {
@@ -171,7 +175,9 @@ function collectSearchRoots(doc: Document): SearchRoot[] {
   return roots;
 }
 
-function getReactFiberNode(element: Element | null): Record<string, unknown> | null {
+function getReactFiberNode(
+  element: Element | null,
+): Record<string, unknown> | null {
   if (!element) {
     return null;
   }
@@ -282,7 +288,10 @@ function isCandidateUsable(video: HTMLVideoElement) {
     return false;
   }
 
-  if (hasMeasuredSize && (!hasEnoughMeasuredSize || !hasEnoughVisibleViewportArea)) {
+  if (
+    hasMeasuredSize &&
+    (!hasEnoughMeasuredSize || !hasEnoughVisibleViewportArea)
+  ) {
     return false;
   }
 
@@ -303,7 +312,8 @@ function getVisibleViewportArea(rect: RectLike) {
     return 0;
   }
 
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportWidth =
+    window.innerWidth || document.documentElement.clientWidth;
   const viewportHeight =
     window.innerHeight || document.documentElement.clientHeight;
 

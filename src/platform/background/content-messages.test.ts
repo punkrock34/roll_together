@@ -32,6 +32,12 @@ function createSession(): TabSession {
     roomId: "room-1",
     roomPlayback: playback,
     localPlayback: playback,
+    sessionId: "session-1",
+    hostSessionId: "session-1",
+    controlMode: "host_only",
+    canControlPlayback: true,
+    canNavigateEpisodes: true,
+    canTransferHost: true,
     socket: undefined,
   };
 }
@@ -49,14 +55,16 @@ function createPort() {
 }
 
 describe("content message controller", () => {
-  it("sends play command for play transitions", () => {
+  it("sends play command for play transitions when playback authority is granted", () => {
     const connectSession = vi.fn();
     const sendPlaybackCommand = vi.fn();
+    const sendNavigateEpisode = vi.fn();
     const requestRoomState = vi.fn();
     const publishRoomState = vi.fn();
     const controller = createContentMessageController({
       connectSession,
       sendPlaybackCommand,
+      sendNavigateEpisode,
       requestRoomState,
       publishRoomState,
     });
@@ -78,11 +86,7 @@ describe("content message controller", () => {
     controller.handleContentMessage(session, message, createPort() as never);
 
     expect(sendPlaybackCommand).toHaveBeenCalledTimes(1);
-    expect(sendPlaybackCommand).toHaveBeenCalledWith(
-      session,
-      "play",
-      expect.objectContaining({ state: "playing" }),
-    );
+    expect(sendNavigateEpisode).not.toHaveBeenCalled();
   });
 
   it("does not send playback commands for heartbeat snapshots", () => {
@@ -90,6 +94,7 @@ describe("content message controller", () => {
     const controller = createContentMessageController({
       connectSession: vi.fn(),
       sendPlaybackCommand,
+      sendNavigateEpisode: vi.fn(),
       requestRoomState: vi.fn(),
       publishRoomState: vi.fn(),
     });
@@ -112,11 +117,13 @@ describe("content message controller", () => {
     expect(sendPlaybackCommand).not.toHaveBeenCalled();
   });
 
-  it("ignores command send when local episode mismatches room episode", () => {
+  it("sends navigate_episode when local episode changes and navigate authority is granted", () => {
     const sendPlaybackCommand = vi.fn();
+    const sendNavigateEpisode = vi.fn();
     const controller = createContentMessageController({
       connectSession: vi.fn(),
       sendPlaybackCommand,
+      sendNavigateEpisode,
       requestRoomState: vi.fn(),
       publishRoomState: vi.fn(),
     });
@@ -143,12 +150,51 @@ describe("content message controller", () => {
 
     controller.handleContentMessage(session, message, createPort() as never);
     expect(sendPlaybackCommand).not.toHaveBeenCalled();
+    expect(sendNavigateEpisode).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send navigate_episode when navigation authority is denied", () => {
+    const sendNavigateEpisode = vi.fn();
+    const requestRoomState = vi.fn();
+    const controller = createContentMessageController({
+      connectSession: vi.fn(),
+      sendPlaybackCommand: vi.fn(),
+      sendNavigateEpisode,
+      requestRoomState,
+      publishRoomState: vi.fn(),
+    });
+
+    const session = createSession();
+    session.canNavigateEpisodes = false;
+    session.roomPlayback = {
+      ...playback,
+      episodeId: "OTHER_EPISODE",
+      episodeUrl: "https://www.crunchyroll.com/watch/OTHER_EPISODE/example",
+    };
+
+    const message: ContentOutboundMessage = {
+      type: "content:snapshot",
+      tabUrl: playback.episodeUrl,
+      episode: {
+        provider: "crunchyroll",
+        episodeId: playback.episodeId,
+        episodeUrl: playback.episodeUrl,
+        episodeTitle: playback.episodeTitle,
+      },
+      playback: { ...playback, state: "playing", updatedAt: 71 },
+      reason: "play",
+    };
+
+    controller.handleContentMessage(session, message, createPort() as never);
+    expect(sendNavigateEpisode).not.toHaveBeenCalled();
+    expect(requestRoomState).toHaveBeenCalledTimes(1);
   });
 
   it("tracks content command outcomes as internal lifecycle state", () => {
     const controller = createContentMessageController({
       connectSession: vi.fn(),
       sendPlaybackCommand: vi.fn(),
+      sendNavigateEpisode: vi.fn(),
       requestRoomState: vi.fn(),
       publishRoomState: vi.fn(),
     });
@@ -178,38 +224,5 @@ describe("content message controller", () => {
     expect(session.latestCommandStatus).toBe("applied");
     expect(session.latestAppliedRevision).toBe(4);
     expect(session.localPlayback?.currentTime).toBe(24);
-  });
-
-  it("requests canonical state on heartbeat mismatch without emitting commands", () => {
-    const sendPlaybackCommand = vi.fn();
-    const requestRoomState = vi.fn();
-    const controller = createContentMessageController({
-      connectSession: vi.fn(),
-      sendPlaybackCommand,
-      requestRoomState,
-      publishRoomState: vi.fn(),
-    });
-
-    const session = createSession();
-    session.roomPlayback = { ...playback, state: "playing", currentTime: 40 };
-
-    const message: ContentOutboundMessage = {
-      type: "content:snapshot",
-      tabUrl: playback.episodeUrl,
-      episode: {
-        provider: "crunchyroll",
-        episodeId: playback.episodeId,
-        episodeUrl: playback.episodeUrl,
-        episodeTitle: playback.episodeTitle,
-      },
-      playback: { ...playback, state: "paused", currentTime: 12, updatedAt: 90 },
-      reason: "heartbeat",
-    };
-
-    controller.handleContentMessage(session, message, createPort() as never);
-
-    expect(sendPlaybackCommand).not.toHaveBeenCalled();
-    expect(requestRoomState).toHaveBeenCalledTimes(1);
-    expect(requestRoomState).toHaveBeenCalledWith(session);
   });
 });

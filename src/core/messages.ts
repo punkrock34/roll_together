@@ -2,6 +2,7 @@ import type {
   EpisodeInfo,
   ParticipantPresence,
   PlaybackSnapshot,
+  RoomControlMode,
   RoomStateSnapshot,
 } from "./protocol";
 import type { RecentRoomEntry, ThemeMode, WatchProgressEntry } from "./storage";
@@ -114,11 +115,18 @@ export interface PopupTransferHostMessage {
   targetSessionId: string;
 }
 
+export interface PopupSetRoomControlModeMessage {
+  type: "popup:set-room-control-mode";
+  tabId: number;
+  controlMode: RoomControlMode;
+}
+
 export type PopupRequestMessage =
   | PopupGetStateMessage
   | PopupCreateRoomMessage
   | PopupDisconnectRoomMessage
-  | PopupTransferHostMessage;
+  | PopupTransferHostMessage
+  | PopupSetRoomControlModeMessage;
 
 export interface PopupStateResponse {
   activeTabId?: number;
@@ -142,5 +150,10 @@ export interface PopupStateResponse {
   episodeMismatch?: boolean;
   episodeMismatchMessage?: string;
   isHost: boolean;
+  hostSessionId?: string;
+  controlMode: RoomControlMode;
+  canControlPlayback: boolean;
+  canNavigateEpisodes: boolean;
+  canTransferHost: boolean;
   themeMode: ThemeMode;
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PROTOCOL_VERSION,
   parseCommandErrorPayload,
+  parseRoomNavigationPayload,
   parseRoomJoinedPayload,
   parseStateSnapshotPayload,
 } from "./protocol";
@@ -29,13 +30,16 @@ describe("extension protocol payload validators", () => {
         roomId: "room-1",
         revision: 1,
         updatedAt: 100,
+        hostSessionId: "session-1",
+        controlMode: "host_only",
+        navigationRevision: 0,
         playback: basePlayback,
         participantCount: 1,
         participants: [
           {
             sessionId: "session-1",
             displayName: "Guest",
-            isHost: false,
+            isHost: true,
             joinedAt: 90,
             lastSeenAt: 100,
             connected: true,
@@ -55,6 +59,9 @@ describe("extension protocol payload validators", () => {
         roomId: "room-1",
         revision: 2,
         updatedAt: 200,
+        hostSessionId: "session-1",
+        controlMode: "host_only",
+        navigationRevision: 0,
         playback: {
           ...basePlayback,
           state: "playing",
@@ -77,6 +84,9 @@ describe("extension protocol payload validators", () => {
           roomId: "room-1",
           revision: 2,
           updatedAt: 200,
+          hostSessionId: "session-1",
+          controlMode: "host_only",
+          navigationRevision: 0,
           playback: basePlayback,
           participantCount: 0,
           participants: [],
@@ -93,5 +103,24 @@ describe("extension protocol payload validators", () => {
     });
 
     expect(message?.code).toBe("episode_mismatch");
+  });
+
+  it("parses room_navigation payloads", () => {
+    const message = parseRoomNavigationPayload({
+      version: PROTOCOL_VERSION,
+      roomId: "room-1",
+      revision: 3,
+      navigationRevision: 1,
+      initiatedBySessionId: "session-1",
+      updatedAt: 250,
+      playback: {
+        ...basePlayback,
+        episodeId: "G123NEWEP",
+        episodeUrl: "https://www.crunchyroll.com/watch/G123NEWEP/example",
+      },
+    });
+
+    expect(message?.navigationRevision).toBe(1);
+    expect(message?.playback.episodeId).toBe("G123NEWEP");
   });
 });

@@ -21,7 +21,10 @@ import type {
   PopupRequestMessage,
   PopupStateResponse,
 } from "../../src/core/messages";
-import type { ParticipantPresence } from "../../src/core/protocol";
+import type {
+  ParticipantPresence,
+  RoomControlMode,
+} from "../../src/core/protocol";
 import { isCrunchyrollUrl } from "../../src/providers/crunchyroll/player";
 import { applyThemeMode } from "../../src/ui/theme";
 
@@ -49,6 +52,10 @@ const THEME_LABELS: Record<ThemeMode, string> = {
   system: "System",
   light: "Light",
   dark: "Dark",
+};
+const ROOM_CONTROL_MODE_LABELS: Record<RoomControlMode, string> = {
+  host_only: "Host only",
+  shared_playback: "Shared playback",
 };
 
 const uiState: PopupUiState = {
@@ -170,7 +177,8 @@ function roomRoleLabel(state: PopupStateResponse) {
     return "Not in a room";
   }
 
-  return "Shared control enabled";
+  const role = state.isHost ? "Host" : "Viewer";
+  return `${role} · ${ROOM_CONTROL_MODE_LABELS[state.controlMode]}`;
 }
 
 function participantDisplayName(
@@ -209,7 +217,7 @@ function describeHomeState(state: PopupStateResponse) {
 
   if (state.connectionState === "connected") {
     return {
-      title: state.episodeTitle ?? "Room connected",
+      title: "Room is live",
       body: roomRoleLabel(state),
     };
   }
@@ -425,6 +433,10 @@ async function createFallbackState(
     themeMode: settings.themeMode,
     lastError,
     isHost: false,
+    controlMode: "shared_playback",
+    canControlPlayback: false,
+    canNavigateEpisodes: false,
+    canTransferHost: false,
   };
 }
 
@@ -444,6 +456,13 @@ function normalizePopupState(
       : fallbackState.recentRooms,
     lastError: state.lastError,
     isHost: Boolean(state.isHost),
+    controlMode:
+      state.controlMode === "shared_playback"
+        ? state.controlMode
+        : "shared_playback",
+    canControlPlayback: Boolean(state.canControlPlayback),
+    canNavigateEpisodes: Boolean(state.canNavigateEpisodes),
+    canTransferHost: Boolean(state.canTransferHost),
   };
 }
 
@@ -479,11 +498,15 @@ async function loadViewModel(): Promise<PopupViewModel> {
 function createTopbar(view: PopupViewModel) {
   const topbar = createElement("header", { className: "topbar" });
   const left = createElement("div");
+  const roomLabel = view.popupState.roomId
+    ? `Room ${view.popupState.roomId}`
+    : "No active room";
+  const title = view.popupState.episodeTitle ?? "Watch Party Controls";
   appendChildren(left, [
-    createElement("span", { className: "eyebrow", text: "Roll Together" }),
+    createElement("span", { className: "eyebrow", text: roomLabel }),
     createElement("strong", {
       className: "topbar-title",
-      text: view.popupState.roomId ? view.popupState.roomId : "Watch parties",
+      text: title,
     }),
   ]);
 
@@ -532,6 +555,30 @@ function createMetaCard(label: string, value: string) {
   return card;
 }
 
+function createInviteLinkSection(shareUrl: string) {
+  const section = createElement("div", { className: "invite-section" });
+  const label = createElement("p", { className: "muted", text: "Invite Link" });
+  const row = createElement("div", { className: "invite-row" });
+  const input = createElement("input", {
+    className: "share-input",
+    type: "text",
+    id: "room-share-url",
+  }) as HTMLInputElement;
+  input.readOnly = true;
+  input.value = shareUrl;
+
+  const copyButton = createButton("", "icon-copy-button", {
+    action: "copy-room-link-inline",
+  });
+  copyButton.setAttribute("aria-label", "Copy invite link");
+  copyButton.title = "Copy invite link";
+  copyButton.appendChild(createElement("span", { className: "copy-icon" }));
+
+  appendChildren(row, [input, copyButton]);
+  appendChildren(section, [label, row]);
+  return section;
+}
+
 function createParticipantsPanel(view: PopupViewModel) {
   const { popupState } = view;
   if (!popupState.roomId || popupState.participants.length === 0) {
@@ -551,26 +598,47 @@ function createParticipantsPanel(view: PopupViewModel) {
   const list = createElement("div", { className: "participant-list" });
   for (const participant of popupState.participants) {
     const item = createElement("div", { className: "participant-item" });
-    const copy = createElement("div");
+    const copy = createElement("div", { className: "participant-copy" });
     appendChildren(copy, [
       createElement("strong", {
         text: participantDisplayName(participant, popupState.sessionId),
       }),
       createElement("p", {
         className: "muted",
-        text: "Viewer",
+        text: participant.isHost ? "Host" : "Viewer",
       }),
     ]);
-
-    const badge = createElement("span", {
-      className: "room-pill",
-      text: "In room",
-    });
 
     const controls = createElement("div", {
       className: "participant-controls",
     });
-    controls.appendChild(badge);
+    controls.appendChild(
+      createElement("span", {
+        className: "room-pill",
+        text: "In room",
+      }),
+    );
+
+    if (participant.isHost) {
+      controls.appendChild(
+        createElement("span", {
+          className: "room-pill participant-host",
+          text: "Host",
+        }),
+      );
+    }
+
+    if (
+      popupState.canTransferHost &&
+      participant.sessionId !== popupState.sessionId &&
+      participant.connected
+    ) {
+      const transferButton = createButton("Make Host", "secondary", {
+        action: "transfer-host",
+      });
+      transferButton.dataset.targetSessionId = participant.sessionId;
+      controls.appendChild(transferButton);
+    }
 
     appendChildren(item, [copy, controls]);
     list.appendChild(item);
@@ -600,8 +668,32 @@ function createHomePanel(view: PopupViewModel) {
       "Participants",
       `${popupState.roomId ? popupState.participantCount : 0}`,
     ),
-    createMetaCard("Role", popupState.roomId ? "Shared" : "None"),
+    createMetaCard("Role", roomRoleLabel(popupState)),
   ]);
+
+  let modeControlField: HTMLElement | undefined;
+  if (popupState.roomId && popupState.canTransferHost) {
+    const modeSelect = createElement("select", {
+      id: "room-control-mode",
+    }) as HTMLSelectElement;
+    for (const mode of ["host_only", "shared_playback"] as RoomControlMode[]) {
+      const option = createElement("option", {
+        text: ROOM_CONTROL_MODE_LABELS[mode],
+      }) as HTMLOptionElement;
+      option.value = mode;
+      option.selected = popupState.controlMode === mode;
+      modeSelect.appendChild(option);
+    }
+
+    const wrapper = createElement("div", { className: "mode-control" });
+    const modeField = createField("Room Control Mode", modeSelect);
+    modeField.classList.add("mode-select-field");
+    const applyButton = createButton("Apply", "secondary mode-apply-button", {
+      action: "set-room-control-mode",
+    });
+    appendChildren(wrapper, [modeField, applyButton]);
+    modeControlField = wrapper;
+  }
 
   const actionRow = createElement("div", { className: "action-row" });
   if (canCreateRoom(popupState)) {
@@ -614,34 +706,37 @@ function createHomePanel(view: PopupViewModel) {
       createButton("Reconnect", "primary grow", { action: "reconnect-room" }),
     );
   }
+  actionRow.classList.add("hero-actions");
+  const heroActions = actionRow.childElementCount > 0 ? actionRow : undefined;
+
+  let inviteSection: HTMLElement | undefined;
+  if (popupState.shareUrl) {
+    inviteSection = createInviteLinkSection(popupState.shareUrl);
+  }
+
+  let dangerZone: HTMLElement | undefined;
   if (popupState.roomId) {
-    actionRow.appendChild(
-      createButton("Copy Link", "secondary", { action: "copy-room-link" }),
-    );
-    actionRow.appendChild(
-      createButton("Leave Room", "secondary", { action: "leave-room" }),
-    );
+    dangerZone = createElement("div", { className: "danger-zone" });
+    appendChildren(dangerZone, [
+      createElement("p", {
+        className: "muted",
+        text: "Need to stop syncing? You can leave this room.",
+      }),
+      createButton("Leave Room", "danger-fill", { action: "leave-room" }),
+    ]);
   }
 
   appendChildren(panel, [
     eyebrowRow,
     createElement("h1", { text: summary.title }),
     createElement("p", { className: "muted", text: summary.body }),
+    heroActions,
     metaGrid,
+    modeControlField,
     createParticipantsPanel(view),
+    inviteSection,
+    dangerZone,
   ]);
-
-  if (popupState.shareUrl) {
-    const input = createElement("input", {
-      className: "share-input",
-      type: "text",
-    }) as HTMLInputElement;
-    input.readOnly = true;
-    input.value = popupState.shareUrl;
-    panel.appendChild(createField("Invite Link", input));
-  }
-
-  panel.appendChild(actionRow);
 
   if (popupState.lastError && popupState.connectionState === "error") {
     panel.appendChild(
@@ -956,7 +1051,19 @@ function bindEvents(view: PopupViewModel) {
       if (nextState) {
         livePopupState = nextState;
       }
-      uiState.notice = "Room created.";
+
+      if (nextState?.shareUrl) {
+        try {
+          await copyToClipboard(
+            nextState.shareUrl,
+            "Room created and link copied.",
+          );
+        } catch {
+          uiState.notice = "Room created. Copy failed, use the copy button.";
+        }
+      } else {
+        uiState.notice = "Room created.";
+      }
       await render();
     });
 
@@ -980,7 +1087,7 @@ function bindEvents(view: PopupViewModel) {
     });
 
   app
-    .querySelector<HTMLButtonElement>("[data-action='copy-room-link']")
+    .querySelector<HTMLButtonElement>("[data-action='copy-room-link-inline']")
     ?.addEventListener("click", async () => {
       if (!view.popupState.shareUrl) {
         return;
@@ -1007,6 +1114,55 @@ function bindEvents(view: PopupViewModel) {
       }
       uiState.notice = "Left the room.";
       await render();
+    });
+
+  app
+    .querySelector<HTMLButtonElement>("[data-action='set-room-control-mode']")
+    ?.addEventListener("click", async () => {
+      const activeTab = await getActiveTab();
+      if (!activeTab?.id) {
+        return;
+      }
+
+      const mode = app.querySelector<HTMLSelectElement>("#room-control-mode")
+        ?.value as RoomControlMode | undefined;
+      if (mode !== "host_only" && mode !== "shared_playback") {
+        return;
+      }
+
+      const nextState = await sendPopupMessage<PopupStateResponse>({
+        type: "popup:set-room-control-mode",
+        tabId: activeTab.id,
+        controlMode: mode,
+      });
+      if (nextState) {
+        livePopupState = nextState;
+      }
+      uiState.notice = "Room control mode updated.";
+      await render();
+    });
+
+  app
+    .querySelectorAll<HTMLButtonElement>("[data-action='transfer-host']")
+    .forEach((button) => {
+      button.addEventListener("click", async () => {
+        const activeTab = await getActiveTab();
+        const targetSessionId = button.dataset.targetSessionId;
+        if (!activeTab?.id || !targetSessionId) {
+          return;
+        }
+
+        const nextState = await sendPopupMessage<PopupStateResponse>({
+          type: "popup:transfer-host",
+          tabId: activeTab.id,
+          targetSessionId,
+        });
+        if (nextState) {
+          livePopupState = nextState;
+        }
+        uiState.notice = "Host transferred.";
+        await render();
+      });
     });
 
   app

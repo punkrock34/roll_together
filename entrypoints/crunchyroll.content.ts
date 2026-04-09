@@ -20,15 +20,6 @@ export default defineContentScript({
   allFrames: false,
   runAt: "document_start",
   main(ctx) {
-    const log = (message: string, details?: Record<string, unknown>) => {
-      if (details) {
-        console.log(`[rt-content] ${message}`, details);
-        return;
-      }
-
-      console.log(`[rt-content] ${message}`);
-    };
-
     const bridgeId = `rt-bridge-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const port = browser.runtime.connect({ name: CONTENT_PORT_NAME });
 
@@ -118,9 +109,6 @@ export default defineContentScript({
           handshakeIntervalId = undefined;
         }
 
-        log("page bridge ready", {
-          bridgeId,
-        });
         return;
       }
 

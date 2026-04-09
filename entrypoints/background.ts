@@ -68,6 +68,7 @@ export default defineBackground({
     const contentMessageController = createContentMessageController({
       connectSession: roomConnectionController.connectSession,
       sendPlaybackCommand: roomConnectionController.sendPlaybackCommand,
+      sendNavigateEpisode: roomConnectionController.sendNavigateEpisode,
       requestRoomState: roomConnectionController.requestRoomState,
       publishRoomState,
     });
@@ -108,9 +109,30 @@ export default defineBackground({
         }
         case "popup:transfer-host": {
           const session = sessions.get(message.tabId);
-          if (session) {
-            session.lastError =
-              "Host transfer is disabled in the shared-control sync model.";
+          if (session && session.roomId && session.canTransferHost) {
+            roomConnectionController.transferHost(
+              session,
+              message.targetSessionId,
+            );
+            session.lastError = undefined;
+            publishRoomState(session);
+          } else if (session) {
+            session.lastError = "Only the host can transfer room ownership.";
+            publishRoomState(session);
+          }
+          return popupStateController.buildActivePopupState();
+        }
+        case "popup:set-room-control-mode": {
+          const session = sessions.get(message.tabId);
+          if (session && session.roomId && session.canTransferHost) {
+            roomConnectionController.setRoomControlMode(
+              session,
+              message.controlMode,
+            );
+            session.lastError = undefined;
+            publishRoomState(session);
+          } else if (session) {
+            session.lastError = "Only the host can change room control mode.";
             publishRoomState(session);
           }
           return popupStateController.buildActivePopupState();

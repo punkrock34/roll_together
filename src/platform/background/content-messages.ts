@@ -45,6 +45,10 @@ interface ContentMessageControllerOptions {
     command: "play" | "pause" | "seek",
     playback: PlaybackSnapshot,
   ) => void;
+  sendNavigateEpisode: (
+    session: TabSession,
+    playback: PlaybackSnapshot,
+  ) => void;
   requestRoomState: (session: TabSession) => void;
   publishRoomState: (session: TabSession) => void;
 }
@@ -83,6 +87,7 @@ function shouldPersistWatchProgress(
 export function createContentMessageController({
   connectSession,
   sendPlaybackCommand,
+  sendNavigateEpisode,
   requestRoomState,
   publishRoomState,
 }: ContentMessageControllerOptions) {
@@ -196,9 +201,14 @@ export function createContentMessageController({
       });
     }
 
-    if (session.connectionState === "connected" && session.roomId) {
+    if (
+      (session.connectionState === "connected" ||
+        session.connectionState === "switching") &&
+      session.roomId
+    ) {
       const mappedCommand = mapReasonToPlaybackCommand(message.reason);
       const roomEpisodeId = session.roomPlayback?.episodeId;
+      const pendingNavigation = session.pendingRemoteNavigation;
 
       if (
         session.episodeMismatch &&
@@ -211,11 +221,39 @@ export function createContentMessageController({
       }
 
       if (
+        pendingNavigation &&
+        normalizedPlayback.episodeId === pendingNavigation.episodeId
+      ) {
+        session.pendingRemoteNavigation = undefined;
+        session.connectionState = "connected";
+        session.episodeMismatch = undefined;
+        session.lastError = undefined;
+        requestCanonicalStateWithCooldown(session);
+        maybeAutoJoin(session);
+        publishRoomState(session);
+        return;
+      }
+
+      if (roomEpisodeId && normalizedPlayback.episodeId !== roomEpisodeId) {
+        if (session.canNavigateEpisodes) {
+          sendNavigateEpisode(session, normalizedPlayback);
+          session.lastError = undefined;
+        } else {
+          session.episodeMismatch = {
+            localEpisodeId: normalizedPlayback.episodeId,
+            roomEpisodeId,
+          };
+          session.lastError = "Only the host can switch episodes in this room.";
+          requestCanonicalStateWithCooldown(session);
+        }
+      } else if (
         mappedCommand &&
         (!roomEpisodeId || normalizedPlayback.episodeId === roomEpisodeId)
       ) {
-        sendPlaybackCommand(session, mappedCommand, normalizedPlayback);
-        session.lastError = undefined;
+        if (session.canControlPlayback) {
+          sendPlaybackCommand(session, mappedCommand, normalizedPlayback);
+          session.lastError = undefined;
+        }
       } else if (
         message.reason === "heartbeat" &&
         roomEpisodeId &&

@@ -53,6 +53,10 @@ export function createPopupStateController({
     themeMode: settings.themeMode,
     lastError,
     isHost: false,
+    controlMode: "shared_playback",
+    canControlPlayback: false,
+    canNavigateEpisodes: false,
+    canTransferHost: false,
   });
 
   const buildActivePopupState = async (): Promise<PopupStateResponse> => {
@@ -77,6 +81,11 @@ export function createPopupStateController({
         ? buildRoomInviteUrl(activeTab.url, session.roomId)
         : undefined;
     const currentPlayback = session?.roomPlayback ?? session?.localPlayback;
+    const isHost = Boolean(
+      session?.sessionId &&
+      session?.hostSessionId &&
+      session.sessionId === session.hostSessionId,
+    );
 
     return {
       activeTabId: activeTab.id,
@@ -105,7 +114,12 @@ export function createPopupStateController({
       episodeMismatchMessage: session?.episodeMismatch
         ? "Room episode does not match local episode."
         : undefined,
-      isHost: false,
+      isHost,
+      hostSessionId: session?.hostSessionId,
+      controlMode: session?.controlMode ?? "shared_playback",
+      canControlPlayback: session?.canControlPlayback ?? false,
+      canNavigateEpisodes: session?.canNavigateEpisodes ?? false,
+      canTransferHost: session?.canTransferHost ?? false,
       themeMode: settings.themeMode,
     };
   };

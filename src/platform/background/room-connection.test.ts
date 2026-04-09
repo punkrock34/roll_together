@@ -13,9 +13,21 @@ import {
 } from "./room-connection";
 
 const mockIo = vi.fn();
+const mockTabsUpdate = vi.fn(
+  async (_tabId?: unknown, _updateProperties?: unknown) => undefined,
+);
 
 vi.mock("socket.io-client", () => ({
-  io: (...args: unknown[]) => mockIo(...args),
+  io: (baseUrl: unknown, options: unknown) => mockIo(baseUrl, options),
+}));
+
+vi.mock("wxt/browser", () => ({
+  browser: {
+    tabs: {
+      update: (tabId: unknown, updateProperties: unknown) =>
+        mockTabsUpdate(tabId, updateProperties),
+    },
+  },
 }));
 
 vi.mock("../../core/storage", () => ({
@@ -74,6 +86,9 @@ function createSession(): TabSession {
     participantCount: 1,
     participants: [],
     connectionState: "ready",
+    canControlPlayback: false,
+    canNavigateEpisodes: false,
+    canTransferHost: false,
     reconnectAttempt: 0,
     localPlayback: { ...localPlayback },
   };
@@ -89,6 +104,9 @@ function buildRoomJoinedPayload(revision = 2) {
       roomId: "room-1",
       revision,
       updatedAt: now,
+      hostSessionId: "session-1",
+      controlMode: "host_only" as const,
+      navigationRevision: 0,
       playback: {
         ...localPlayback,
         state: "playing" as const,
@@ -99,13 +117,34 @@ function buildRoomJoinedPayload(revision = 2) {
         {
           sessionId: "session-1",
           displayName: "Guest",
-          isHost: false,
+          isHost: true,
           joinedAt: now,
           lastSeenAt: now,
           connected: true,
         },
       ],
       participantCount: 1,
+    },
+  };
+}
+
+function buildRoomNavigationPayload() {
+  const now = Date.now();
+  return {
+    version: PROTOCOL_VERSION,
+    roomId: "room-1",
+    revision: 5,
+    navigationRevision: 1,
+    initiatedBySessionId: "session-2",
+    updatedAt: now,
+    playback: {
+      ...localPlayback,
+      episodeId: "G123NEWEP",
+      episodeUrl: "https://www.crunchyroll.com/watch/G123NEWEP/example",
+      episodeTitle: "Episode 8",
+      state: "paused" as const,
+      currentTime: 0,
+      updatedAt: now,
     },
   };
 }
@@ -144,6 +183,7 @@ describe("bounded command verification", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockIo.mockReset();
+    mockTabsUpdate.mockReset();
   });
 
   afterEach(() => {
@@ -162,7 +202,10 @@ describe("bounded command verification", () => {
       .map((call) => call[1] as BackgroundOutboundMessage)
       .find((message) => message.type === "background:apply-state-snapshot");
     expect(applyMessage?.type).toBe("background:apply-state-snapshot");
-    if (!applyMessage || applyMessage.type !== "background:apply-state-snapshot") {
+    if (
+      !applyMessage ||
+      applyMessage.type !== "background:apply-state-snapshot"
+    ) {
       return;
     }
 
@@ -247,10 +290,30 @@ describe("bounded command verification", () => {
 
     const applyCount = postToContent.mock.calls
       .map((call) => call[1] as BackgroundOutboundMessage)
-      .filter((message) => message.type === "background:apply-state-snapshot")
-      .length;
+      .filter(
+        (message) => message.type === "background:apply-state-snapshot",
+      ).length;
 
     expect(applyCount).toBe(1);
+  });
+
+  it("follows remote room_navigation by navigating the tab", async () => {
+    const { controller, fakeSocket } = createControllerHarness();
+    const session = createSession();
+
+    await controller.connectSession(session, "room-1");
+    fakeSocket.trigger("connect");
+    fakeSocket.trigger("room_joined", buildRoomJoinedPayload(4));
+    fakeSocket.trigger("room_navigation", buildRoomNavigationPayload());
+
+    expect(session.connectionState).toBe("switching");
+    expect(mockTabsUpdate).toHaveBeenCalledTimes(1);
+    expect(mockTabsUpdate).toHaveBeenCalledWith(
+      session.tabId,
+      expect.objectContaining({
+        url: expect.stringContaining("rollTogetherRoom=room-1"),
+      }),
+    );
   });
 });
 
